@@ -574,20 +574,7 @@ static void pm_suspend_marker(char *annotation)
  */
 int pm_suspend(suspend_state_t state)
 {
-	int error;
-
-	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
-		return -EINVAL;
-
-	pm_suspend_marker("entry");
-	error = enter_state(state);
-	if (error) {
-		suspend_stats.fail++;
-		dpm_save_failed_errno(error);
-	} else {
-		suspend_stats.success++;
-	}
-	pm_suspend_marker("exit");
-	return error;
+	pr_notice("[CT07] pm_suspend(%d) blocked - keep recovery alive\n", state);
+	return 0;
 }
 EXPORT_SYMBOL(pm_suspend);

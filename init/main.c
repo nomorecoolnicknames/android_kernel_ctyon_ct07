@@ -735,9 +735,6 @@ static void ct07_diag_wdt_kick(const char *where)
 	struct wd_api *wd_api = NULL;
 	int res;
 
-	if (!ct07_diag_enabled())
-		return;
-
 	res = get_wd_api(&wd_api);
 	if (!res && wd_api && wd_api->wd_restart) {
 		wd_api->wd_restart(WD_TYPE_NOLOCK);
@@ -774,7 +771,7 @@ static void ct07_wdt_diag_start(void)
 	static bool started;
 	struct task_struct *tsk;
 
-	if (!ct07_diag_enabled() || started)
+	if (started)
 		return;
 
 	started = true;
