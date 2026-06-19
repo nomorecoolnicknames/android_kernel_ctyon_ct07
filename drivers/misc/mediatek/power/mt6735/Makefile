@@ -1,4 +1,5 @@
-#include $(srctree)/drivers/misc/mediatek/Makefile.custom
+MTK_PLATFORM := $(subst ",,$(CONFIG_MTK_PLATFORM))
+ccflags-y += -I$(srctree)/drivers/misc/mediatek/power/$(MTK_PLATFORM)
 
 #obj-$(CONFIG_MTK_PMIC)          += pmic.o upmu_common.o pmic_auxadc.o pmic_chr_type_det.o mt6311.o
 obj-$(CONFIG_MTK_PMIC)          += pmic.o upmu_common.o pmic_auxadc.o mt6311.o

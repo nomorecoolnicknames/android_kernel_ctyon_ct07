@@ -1161,6 +1161,11 @@ static int mt_usb_init(struct musb *musb)
 	musb->is_host = false;
 	musb->fifo_size = 8 * 1024;
 
+#ifndef FPGA_PLATFORM
+	set_usb_rdy();
+	DBG(0, "[CT07_USB] early set_usb_rdy in mt_usb_init\n");
+#endif
+
 	wake_lock_init(&musb->usb_lock, WAKE_LOCK_SUSPEND, "USB suspend lock");
 
 #ifndef FPGA_PLATFORM

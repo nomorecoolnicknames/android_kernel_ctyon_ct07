@@ -99,6 +99,8 @@ void init_boot_common(unsigned int line)
 unsigned int get_boot_mode(void)
 {
 	init_boot_common(__LINE__);
+	if (g_boot_mode == 8 || g_boot_mode == 9)
+		g_boot_mode = RECOVERY_BOOT;
 	return g_boot_mode;
 }
 EXPORT_SYMBOL(get_boot_mode);

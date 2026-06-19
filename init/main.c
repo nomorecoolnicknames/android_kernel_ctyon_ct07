@@ -85,6 +85,7 @@
 #include <asm/setup.h>
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
+#include <mach/wd_api.h>
 #ifdef CONFIG_MTPROF
 #include "bootprof.h"
 #endif
@@ -503,10 +504,23 @@ static void __init mm_init(void)
 	vmalloc_init();
 }
 
+#ifdef CT07_FORCE_EARLY_PC_MARKER
+static noinline __noreturn void __init ct07_early_pc_marker_spin(void)
+{
+	local_irq_disable();
+	for (;;)
+		asm volatile("nop\nnop\nnop" ::: "memory");
+}
+#endif
+
 asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
 	char *after_dashes;
+
+#ifdef CT07_FORCE_EARLY_PC_MARKER
+	ct07_early_pc_marker_spin();
+#endif
 
 	/*
 	 * Need to run as early as possible, to initialize the
@@ -700,6 +714,100 @@ static void __init do_ctors(void)
 bool initcall_debug;
 core_param(initcall_debug, initcall_debug, bool, 0644);
 
+extern int ipanic_write_size(void *buf, int off, int len);
+
+#define CT07_EXPDB_MARK_OFF 0x9f0000
+#define CT07_EXPDB_MARK_LEN 512
+#define CT07_WDT_DIAG_SECONDS 120
+#define CT07_WDT_DIAG_INTERVAL_MS 2000
+
+static char ct07_expdb_mark_buf[CT07_EXPDB_MARK_LEN] __aligned(512);
+
+static bool ct07_diag_enabled(void)
+{
+	return saved_command_line &&
+		(strstr(saved_command_line, "androidboot.ct07src=ct07xpd1") ||
+		 strstr(saved_command_line, "androidboot.ct07src=ct07wdt1"));
+}
+
+static void ct07_diag_wdt_kick(const char *where)
+{
+	struct wd_api *wd_api = NULL;
+	int res;
+
+	if (!ct07_diag_enabled())
+		return;
+
+	res = get_wd_api(&wd_api);
+	if (!res && wd_api && wd_api->wd_restart) {
+		wd_api->wd_restart(WD_TYPE_NOLOCK);
+		pr_notice("[CT07_WDT] kick %s sched=%llu\n", where,
+			  (unsigned long long)sched_clock());
+	} else {
+		pr_notice("[CT07_WDT] no wd api %s res=%d api=%p\n",
+			  where, res, wd_api);
+	}
+}
+
+static int ct07_wdt_diag_thread(void *unused)
+{
+	int elapsed;
+
+	/* CT07: kick the watchdog FOREVER so recovery userspace stays alive
+	 * long enough to bring up adb / be inspected. The bounded window was
+	 * only useful for the early-hang diagnostic; now the kernel reaches
+	 * userspace and we must prevent the ~30s HW-WDT fallback. */
+	for (elapsed = 0; ; elapsed += CT07_WDT_DIAG_INTERVAL_MS / 1000) {
+		if (kthread_should_stop())
+			break;
+		ct07_diag_wdt_kick("thread");
+		msleep(CT07_WDT_DIAG_INTERVAL_MS);
+	}
+
+	pr_notice("[CT07_WDT] stop kicks elapsed=%d sched=%llu\n",
+		  elapsed, (unsigned long long)sched_clock());
+	return 0;
+}
+
+static void ct07_wdt_diag_start(void)
+{
+	static bool started;
+	struct task_struct *tsk;
+
+	if (!ct07_diag_enabled() || started)
+		return;
+
+	started = true;
+	ct07_diag_wdt_kick("start");
+	tsk = kthread_run(ct07_wdt_diag_thread, NULL, "ct07wdt");
+	if (IS_ERR(tsk))
+		pr_err("[CT07_WDT] kthread_run failed %ld\n", PTR_ERR(tsk));
+	else
+		pr_notice("[CT07_WDT] started pid=%d\n", task_pid_nr(tsk));
+}
+
+static void ct07_expdb_mark(const char *phase, initcall_t fn,
+			    int ret, unsigned long long ns)
+{
+	int len;
+
+	if (!ct07_diag_enabled())
+		return;
+
+	ct07_diag_wdt_kick(phase);
+
+	memset(ct07_expdb_mark_buf, 0, sizeof(ct07_expdb_mark_buf));
+	len = snprintf(ct07_expdb_mark_buf, sizeof(ct07_expdb_mark_buf),
+		       "CT07XPD1 phase=%s fn=%pf ret=%d ns=%llu sched=%llu\n",
+		       phase, fn, ret, ns,
+		       (unsigned long long)sched_clock());
+	if (len < 0)
+		return;
+
+	ipanic_write_size(ct07_expdb_mark_buf, CT07_EXPDB_MARK_OFF,
+			  CT07_EXPDB_MARK_LEN);
+}
+
 #ifdef CONFIG_KALLSYMS
 struct blacklist_entry {
 	struct list_head next;
@@ -792,6 +900,7 @@ int __init_or_module do_one_initcall(initcall_t fn)
 	if (initcall_blacklisted(fn))
 		return -EPERM;
 	ts = sched_clock();
+	ct07_expdb_mark("pre", fn, 0, 0);
 #if defined(CONFIG_MT_ENG_BUILD)
 	ret = do_one_initcall_debug(fn);
 #else
@@ -801,6 +910,7 @@ int __init_or_module do_one_initcall(initcall_t fn)
 		ret = fn();
 #endif
 	ts = sched_clock() - ts;
+	ct07_expdb_mark("post", fn, ret, ts);
 	msgbuf[0] = 0;
 
 	if (preempt_count() != count) {
@@ -1000,6 +1110,7 @@ static noinline void __init kernel_init_freeable(void)
 	 * Wait until kthreadd is all set-up.
 	 */
 	wait_for_completion(&kthreadd_done);
+	ct07_wdt_diag_start();
 
 	/* Now the scheduler is fully set up and can do blocking allocations */
 	gfp_allowed_mask = __GFP_BITS_MASK;

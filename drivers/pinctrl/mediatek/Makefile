@@ -1,4 +1,5 @@
 # Core
+ccflags-y += -I$(srctree)/drivers/pinctrl/mediatek
 obj-$(CONFIG_PINCTRL_MTK_COMMON)	+= pinctrl-mtk-common.o
 # obj-y	+= pinctrl-mtk-common.o
 # SoC Drivers
