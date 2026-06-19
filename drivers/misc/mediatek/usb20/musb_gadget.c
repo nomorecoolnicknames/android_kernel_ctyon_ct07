@@ -2797,6 +2797,9 @@ static int musb_gadget_start(struct usb_gadget *g, struct usb_gadget_driver *dri
 		goto err;
 	}
 
+	musb->is_ready = 1;
+	DBG(0, "[CT07_USB] musb_gadget_start: is_ready=1 (stock-matching)\n");
+
 	if ((musb->xceiv->last_event == USB_EVENT_ID)
 	    && otg->set_vbus)
 		otg_set_vbus(otg, 1);
