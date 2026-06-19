@@ -220,6 +220,8 @@ void kernel_restart(char *cmd)
 		pr_emerg("Restarting system\n");
 	else
 		pr_emerg("Restarting system with command '%s'\n", cmd);
+	pr_emerg("[CT07_RESTART] caller trace:\n");
+	dump_stack();
 	kmsg_dump(KMSG_DUMP_RESTART);
 	machine_restart(cmd);
 }

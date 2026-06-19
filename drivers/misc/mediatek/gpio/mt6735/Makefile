@@ -1,3 +1,6 @@
+MTK_PLATFORM := $(subst ",,$(CONFIG_MTK_PLATFORM))
+ccflags-y += -I$(srctree)/drivers/misc/mediatek/gpio/$(MTK_PLATFORM)
+
 ifeq ($(CONFIG_MTK_FPGA),y)
 obj-y	:= mt_gpio_fpga.o
 else
