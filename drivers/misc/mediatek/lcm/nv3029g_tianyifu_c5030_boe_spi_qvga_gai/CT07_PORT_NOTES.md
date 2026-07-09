@@ -9,7 +9,11 @@ Firmware evidence:
 - `MTK_LCM_DEVICE_TREE_SUPPORT = no`
 - Reverse says SPI-like DBI, not MIPI DSI.
 - Compare-id anchors: read `0xD9` / `0xD3`, expected `0x9341`.
-- Reset/init delay anchors: `20/20/100 ms`.
+- Reset/init delay anchors: init reset = `20/150/120 ms` (from LK RE
+  2026-07-09, `kernel-reverse/lk-nv3029g-display-20260709.md`). The old
+  `20/20/100` anchor was LK's *compare_id* reset, not *init* — corrected.
+  Init table also needs delays 5 ms after {0x80,0x05}, 100 ms after
+  {0x80,0x01}, 10 ms after 0x29 (all applied, commit ee713a70).
 - DTB pinctrl names: `lcd_cs`, `lcd_clk`, `lcd_rs`, `lcd_data`,
   `lcd_backlight`.
 
