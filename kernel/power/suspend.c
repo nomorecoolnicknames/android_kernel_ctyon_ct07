@@ -574,7 +574,18 @@ static void pm_suspend_marker(char *annotation)
  */
 int pm_suspend(suspend_state_t state)
 {
+	static bool ct07_suspend_caller_dumped;
+
 	pr_notice("[CT07] pm_suspend(%d) blocked - keep recovery alive\n", state);
+	/* One-shot caller trace: identifies WHAT initiates suspend on this
+	 * kernel (unresolved as of the 2026-07-09 WDT RE — no /sys/power writer
+	 * in the ramdisk, no in-tree pm_suspend caller found). Survives to
+	 * ram_console/pstore; boot with ignore_loglevel to capture it. */
+	if (!ct07_suspend_caller_dumped) {
+		ct07_suspend_caller_dumped = true;
+		pr_notice("[CT07] pm_suspend first-call caller trace:\n");
+		dump_stack();
+	}
 	return 0;
 }
 EXPORT_SYMBOL(pm_suspend);
