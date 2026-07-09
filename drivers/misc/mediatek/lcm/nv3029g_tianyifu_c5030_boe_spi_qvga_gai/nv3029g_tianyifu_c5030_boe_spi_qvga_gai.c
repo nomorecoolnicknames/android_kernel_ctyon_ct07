@@ -25,7 +25,9 @@ static const struct lcm_setting_table lcm_initialization_setting[] = {
 	{0xfd, 2, {0x06, 0x07}},
 	{0x66, 1, {0x80}},
 	{0x80, 1, {0x05}},
+	{REGFLAG_DELAY, 5, {0x00}},
 	{0x80, 1, {0x01}},
+	{REGFLAG_DELAY, 100, {0x00}},
 	{0xb6, 2, {0x02, 0xa2}},
 	{0x60, 1, {0x26}},
 	{0x63, 1, {0x08}},
@@ -59,6 +61,7 @@ static const struct lcm_setting_table lcm_initialization_setting[] = {
 	{0x36, 1, {0x08}},
 	{0x3a, 1, {0x65}},
 	{0x29, 0, {0x00}},
+	{REGFLAG_DELAY, 10, {0x00}},
 	{REGFLAG_END_OF_TABLE, 0, {0x00}},
 };
 
@@ -160,9 +163,9 @@ static void lcm_init(void)
 	SET_RESET_PIN(1);
 	MDELAY(20);
 	SET_RESET_PIN(0);
-	MDELAY(20);
+	MDELAY(150);
 	SET_RESET_PIN(1);
-	MDELAY(100);
+	MDELAY(120);
 
 	push_table(lcm_initialization_setting,
 		   ARRAY_SIZE(lcm_initialization_setting));
