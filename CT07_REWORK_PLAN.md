@@ -191,10 +191,13 @@ adb ... exec-out 'cat /dev/block/mmcblk0p8' | sha256sum        # readback тол
 - **2.4 Секторные маркеры expdb @0x9f0000** (механизм n32-023) —
   стандартизировать: скрипт стадий init в ramdisk + kernel panic-notifier
   (одна строка, cmdline-gated) + nonce каждого образа.
-- **2.5 Стена 10.6 с**: гипотезы — (a) TWRP/init снижает loglevel или забирает
-  консоль; (b) wrap 64K ram_console; (c) suspend (уже заблокирован).
-  Тест-дискриминатор: контрольный boot стокового ядра — идёт ли ЕГО
-  ram_console дальше 10.6 с. Фикс возвращает видимость userspace-стадий без
+- **2.5 Стена 10.6 с — РЕШЕНО (2026-07-09).** Причина (FACT): рамдиск TWRP,
+  `init.rc:15` = `write /proc/sys/kernel/printk "1 1 1 1"` на `on init` →
+  console_loglevel=1 с ~10с, ram_console (зарегистрированная консоль) молчит.
+  Обход: `ignore_loglevel` в cmdline (образ fix2a002+), рамдиск не трогаем.
+  (Старый текст ниже оставлен как история.) Тест-дискриминатор: контрольный
+  boot стокового ядра — идёт ли ЕГО ram_console дальше 10.6 с. Фикс возвращает
+  видимость userspace-стадий без
   UART.
 - **2.6 Runbook `DIAGNOSTICS_CT07.md`**: таблица «канал → фаза загрузки → как
   читать → правила свежести → команды».
@@ -209,11 +212,26 @@ adb ... exec-out 'cat /dev/block/mmcblk0p8' | sha256sum        # readback тол
 - **3.1 `CONFIG_CT07_BRINGUP`** (+cmdline-флаги) — перевести под него все хаки:
   WDT-off, KPOC-override, pm_suspend-block, restart tracer, USB-форсы.
   Прод-профиль = стоковое поведение.
-- **3.2 WDT вернуть** в прод-профиле (без HW watchdog шипить нельзя). Открытый
-  вопрос: почему источник ловил WDT на ~35–47 с, а стоковое ядро в том же
-  TWRP — нет (HYPOTHESIS: разница конфигурации wd_kicker/таймаута;
-  falsification: Ghidra-сравнение `mtk_wdt` init сток/источник + контрольный
-  замер стока).
+- **3.2 WDT вернуть** в прод-профиле. RE выполнен 2026-07-09
+  (`kernel-reverse/wdt-stock-vs-source-20260709.md`). Гипотеза «разница
+  конфигурации wd_kicker/таймаута» **ОТВЕРГНУТА**: сток и источник настраивают
+  WDT побитово одинаково (probe→enable, 30с, dual-mode, kicker `wdtk-N` каждые
+  20с; live-dmesg стока: кик каждые 20с до 429с при взведённом WDT). Реальная
+  причина (INFERENCE): на источнике kicker перестаёт планироваться в окне
+  ~10–17с (то же, что suspend/KPOC), WDT остаётся взведён → cold reset +30с =
+  35–47с. Прод-фикс: убрать два форс-присвоения в `mtk_wdt.c`
+  (`wdt_en=FALSE`, `WK_WDT_DIS`) под `#ifdef CONFIG_CT07_BRINGUP`; конфиги
+  `CONFIG_MTK_WATCHDOG=y`+`CONFIG_MTK_WD_KICKER=y` и таймаут 30с не трогать.
+  Плюс: убрать/загейтить лишний in-kernel 2с `ct07wdt`-kicker (init/main.c) в
+  проде — он дублирует WDK и глушит per-CPU детект зависания. Порядок: сначала
+  WDT-on при ещё заблокированном suspend (низкий риск, это состояние жило до
+  157с), ТОЛЬКО потом возвращать suspend (3.4) с маркерами вокруг
+  suspend_enter/spm_go_to_sleep/wd_suspend_notify.
+- **3.2a Открытый вопрос — инициатор suspend.** Что вообще запускает suspend на
+  источнике, НЕИЗВЕСТНО (в рамдиске нет писателя `/sys/power/*`, в дереве нет
+  вызова pm_suspend). Добавлен одноразовый `dump_stack()` в `pm_suspend()`
+  (commit 76bfdaf5) → на первом буте caller осядет в pstore (ловить с
+  `ignore_loglevel`). Это разблокирует корректный возврат suspend в 3.4.
 - **3.3 KPOC вернуть** в прод-профиле (зарядка выключенного аппарата — базовая
   функция телефона); стендовый bring-up остаётся без KPOC.
 - **3.4 pm_suspend вернуть**; удержание бодрствования в recovery — штатным
