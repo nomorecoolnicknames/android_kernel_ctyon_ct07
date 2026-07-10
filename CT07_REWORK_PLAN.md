@@ -380,3 +380,62 @@ bringup-сборка сохраняет всю диагностику.
 6. **Track B** — device tree + vendor + сборка LOS 14.1/Omni.
 
 Фаза 2 (диагностика) начинается сразу и поддерживается постоянно.
+
+---
+
+## 11. Patch history
+
+### 2026-07-10 — section-mismatch lifetime repair
+
+**Category: PROPER-FIX.**
+
+**Hypothesis.** The 36 final-production modpost mismatches are not one benign
+legacy warning class. Early-only memory scanners merely lack `__init`, while
+boot-mode, PMIC, framebuffer, CCCI, ATF, cpuidle, fault-hook and SPI paths can
+remain callable after `free_initmem()`. Fixing the actual lifetime boundary,
+instead of adding `__ref` or suppressing modpost, must reduce verbose modpost
+to zero without changing the production config or compiled DTB.
+
+**Evidence.** Pre-fix artifact
+`out/kernel-builds/production-final-20260710/vmlinux` (project-root path),
+SHA-256 `759a6e3105c9d246810769ecd38a03835d42b24d196ea2969ddd477912889b1c`,
+reported `Found 36 section mismatch(es)`; the complete caller/callee ledger is
+`docs/CT07_SECTION_MISMATCH_AUDIT.md` in the project root. A clean production
+tmpfs build from the patched tree completed `zImage-dtb`; direct verbose
+modpost printed zero lines. Its `.config` SHA-256 remains
+`3b26d07209bb1627f24b1caf3180ec51f98d18efc3e611635e219c54ef3af871`
+and DTB SHA-256 remains
+`699b6b9db6925138fdf063df8430d7a1988841c06b45a8b7ee93184d08d367bd`.
+
+**Files changed and why.**
+
+- `arch/arm/mm/fault.c`, `drivers/spi/mediatek/mt6735/spi-dev.c`, and
+  `drivers/misc/mediatek/base/power/spm_v1/mt_idle.c`: keep genuinely
+  runtime-callable hooks/probes/helpers resident instead of pointing at freed
+  init text.
+- `drivers/misc/mediatek/{atf_log,boot,boot_reason,ccci_util,power,video}`:
+  replace runtime use of flat-DT init helpers with refcounted live OF-node and
+  property lookup, preserving the raw MTK/LK tag layout.
+- `drivers/misc/mediatek/base/power/spm_v1/mt_spm_internal.c`: read the
+  persistent live memory node, validate `orig_dram_info`, and make repeated
+  calls safe.
+- `drivers/misc/mediatek/mem/{mtk_memcfg.c,mtk_meminfo.c}`: mark proven
+  early-only flat-DT callbacks `__init`; the exported DRAM-size getter no
+  longer retries an early-only parser after init memory has been freed.
+
+**Expected next marker.** Final production and bring-up builds must both show
+zero verbose modpost output. The next packaged p8 test uses
+`androidboot.ct07src=fix2a006`; G1 must retain that marker for at least 300 s.
+
+**Rollback condition.** Revert this commit if a hash-verified `fix2a006` boot
+regresses boot-mode/reason, LCM tag parsing, PMIC DLPT, ATF log reservation,
+CCCI modem selection, SPM suspend, DRAM size, cpuidle or SPI probe relative to
+`fix2a005`, while partition identity and capture freshness are proven.
+
+**Verification commands.** Run `scripts/build_ct07_kernel.sh` from the project
+root once with `DEFCONFIG=ct07_defconfig` and once with
+`DEFCONFIG=ct07_bringup_defconfig`; then invoke each build's `scripts/mod/modpost`
+without `-S` against its exact `vmlinux.o` and require empty output. Package
+only the bring-up manifest as `fix2a006`, verify its full 16 MiB SHA/readback,
+then run `scripts/capture_ct07_g1.sh fix2a006 <p8-sha> <p7-sha>` on the current
+explicit ADB port.

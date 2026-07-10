@@ -16,9 +16,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/of.h>
-#ifdef CONFIG_OF
-#include <linux/of_fdt.h>
-#endif
 #include <linux/atomic.h>
 #include <mt-plat/mt_boot_common.h>
 
@@ -40,32 +37,15 @@ struct tag_bootmode {
 	u32 tag;
 	u32 bootmode;
 };
-static int __init dt_get_boot_common(unsigned long node, const char *uname, int depth, void *data)
-{
-	struct tag_bootmode *tags = NULL;
-
-	if (depth != 1 || (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
-		return 0;
-
-	tags = (struct tag_bootmode *)of_get_flat_dt_prop(node, "atag,boot", NULL);
-
-	if (tags) {
-		g_boot_mode = tags->bootmode;
-		atomic_set(&g_boot_status, 1);
-	} else {
-		pr_warn("'atag,boot' is not found\n");
-	}
-
-	/* break now */
-	return 1;
-}
 #endif
 
 
 void init_boot_common(unsigned int line)
 {
 #ifdef CONFIG_OF
-	int rc;
+	struct device_node *chosen;
+	const struct tag_bootmode *tags;
+	int len = 0;
 
 	if (BM_INITIALIZING == atomic_read(&g_boot_init)) {
 		pr_warn("%s (%d) state(%d,%d)\n", __func__, line, atomic_read(&g_boot_init),
@@ -86,11 +66,24 @@ void init_boot_common(unsigned int line)
 	}
 
 	pr_debug("%s %d %d %d\n", __func__, line, g_boot_mode, atomic_read(&g_boot_init));
-	rc = of_scan_flat_dt(dt_get_boot_common, NULL);
-	if (0 != rc)
-		atomic_set(&g_boot_init, BM_INITIALIZED);
-	else
-		pr_warn("of_scan_flat_dt() = %d", rc);
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		chosen = of_find_node_by_path("/chosen@0");
+	if (!chosen) {
+		pr_warn("chosen node is not found\n");
+		atomic_set(&g_boot_init, BM_UNINIT);
+		return;
+	}
+
+	tags = of_get_property(chosen, "atag,boot", &len);
+	if (tags && len >= sizeof(*tags)) {
+		g_boot_mode = tags->bootmode;
+		atomic_set(&g_boot_status, 1);
+	} else {
+		pr_warn("'atag,boot' is not found or truncated\n");
+	}
+	of_node_put(chosen);
+	atomic_set(&g_boot_init, BM_INITIALIZED);
 	pr_debug("%s %d %d %d\n", __func__, line, g_boot_mode, atomic_read(&g_boot_init));
 #endif
 }

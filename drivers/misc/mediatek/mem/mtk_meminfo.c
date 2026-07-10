@@ -9,7 +9,7 @@
 /* return the actual physical DRAM size */
 static u64 kernel_mem_sz;
 static u64 phone_dram_sz;	/* original phone DRAM size */
-static int dt_scan_memory(unsigned long node, const char *uname,
+static int __init dt_scan_memory(unsigned long node, const char *uname,
 				int depth, void *data)
 {
 	const char *type = of_get_flat_dt_prop(node, "device_type", NULL);
@@ -81,8 +81,8 @@ static int __init init_get_max_DRAM_size(void)
 
 phys_addr_t get_max_DRAM_size(void)
 {
-	if (!phone_dram_sz && !kernel_mem_sz)
-		init_get_max_DRAM_size();
+	if (unlikely(!phone_dram_sz && !kernel_mem_sz))
+		pr_warn_once("DRAM size was not initialized during early boot\n");
 	return phone_dram_sz ?
 		(phys_addr_t)phone_dram_sz : (phys_addr_t)kernel_mem_sz;
 }

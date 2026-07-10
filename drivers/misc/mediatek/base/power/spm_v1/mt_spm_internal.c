@@ -4,7 +4,7 @@
 #include <linux/delay.h>
 #include <linux/atomic.h>
 #include <linux/string.h>
-#include <linux/of_fdt.h>
+#include <linux/of.h>
 #include <uapi/asm/setup.h>
 #include <mt-plat/upmu_common.h>
 
@@ -525,35 +525,33 @@ void __spm_disable_i2c4_clk(void)
 #endif
 
 static u32 spm_dram_dummy_read_flags;
-#ifdef CONFIG_OF
-static int dt_scan_memory(unsigned long node, const char *uname, int depth, void *data)
+bool spm_set_pcm_init_flag(void)
 {
-	const char *type = of_get_flat_dt_prop(node, "device_type", NULL);
-	const __be32 *reg;
-	const struct dram_info *dram_info = NULL;
+#ifdef CONFIG_OF
+	struct device_node *node;
+	const struct dram_info *dram_info;
 
-	/* We are scanning "memory" nodes only */
-	if (type == NULL) {
-		/*
-		 * The longtrail doesn't have a device_type on the
-		 * /memory node, so look for the node called /memory@0.
-		 */
-		if (depth != 1 || strcmp(uname, "memory@0") != 0)
-			return 0;
-	} else if (strcmp(type, "memory") != 0)
-		return 0;
-
-	reg = (const __be32 *)of_get_flat_dt_prop(node, "reg", NULL);
-	if (reg == NULL)
-		return 0;
-
-	if (node) {
-		/* orig_dram_info */
-		dram_info = (const struct dram_info *)of_get_flat_dt_prop(node, "orig_dram_info", NULL);
+	node = of_find_node_by_type(NULL, "memory");
+	if (!node)
+		node = of_find_node_by_path("/memory@0");
+	if (!node) {
+		pr_err("dram rank1_info_error: memory node not found\n");
+		return true;
 	}
 
-	if ((dram_info->rank_info[1].start == 0x60000000)
-	    || (dram_info->rank_info[1].start == 0x70000000))
+	dram_info = of_get_property(node, "orig_dram_info", NULL);
+	if (!dram_info) {
+		pr_err("dram rank1_info_error: orig_dram_info not found\n");
+		of_node_put(node);
+		return true;
+	}
+
+	spm_dram_dummy_read_flags = 0;
+	if (dram_info->rank_num < 2 || dram_info->rank_info[1].size == 0)
+		goto out;
+
+	if (dram_info->rank_info[1].start == 0x60000000
+	    || dram_info->rank_info[1].start == 0x70000000)
 		spm_dram_dummy_read_flags |= SPM_DRAM_RANK1_ADDR_SEL0;
 	else if (dram_info->rank_info[1].start == 0x80000000)
 		spm_dram_dummy_read_flags |= SPM_DRAM_RANK1_ADDR_SEL1;
@@ -561,35 +559,25 @@ static int dt_scan_memory(unsigned long node, const char *uname, int depth, void
 		spm_dram_dummy_read_flags |= SPM_DRAM_RANK1_ADDR_SEL2;
 	else if (dram_info->rank_info[1].start == 0xa0000000)
 		spm_dram_dummy_read_flags |= SPM_DRAM_RANK1_ADDR_SEL3;
-	else if (dram_info->rank_info[1].size != 0x0) {
+	else {
 		pr_err("dram rank1_info_error: no rank info\n");
 		BUG_ON(1);
 	}
 
-	return node;
-}
+out:
+	of_node_put(node);
+	return true;
+#else
+	pr_err("dram rank1_info_error: CONFIG_OF is disabled\n");
+	BUG_ON(1);
+	return false;
 #endif
+}
 
 
 void spm_set_dram_bank_info_pcm_flag(u32 *pcm_flags)
 {
 	*pcm_flags |= spm_dram_dummy_read_flags;
-}
-
-
-bool spm_set_pcm_init_flag(void)
-{
-#ifdef CONFIG_OF
-	int node;
-
-	node = of_scan_flat_dt(dt_scan_memory, NULL);
-
-#else
-	pr_err("dram rank1_info_error: no rank info\n");
-	BUG_ON(1);
-#endif
-
-	return true;
 }
 #endif /* !defined(CONFIG_ARCH_MT6580) */
 

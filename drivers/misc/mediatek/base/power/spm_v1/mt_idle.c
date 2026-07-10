@@ -767,7 +767,7 @@ void faudintbus_sq2pll(void)
 	clk_writel(CLK_CFG_4, clk_cfg_4);
 }
 
-static int __init get_base_from_node(
+static int get_base_from_node(
 				     const struct of_device_id *ids, void __iomem **pbase, int idx, const char *cmp)
 {
 	struct device_node *node;
@@ -791,7 +791,7 @@ static int __init get_base_from_node(
 	return 0;
 }
 
-static void __init iomap_init(void)
+static void iomap_init(void)
 {
 	static const struct of_device_id infra_ao_ids[] = {
 		{.compatible = "mediatek,infracfg_ao"},
