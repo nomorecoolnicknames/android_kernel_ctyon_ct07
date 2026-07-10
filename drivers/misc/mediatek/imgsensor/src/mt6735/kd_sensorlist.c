@@ -167,6 +167,7 @@ static inline void KD_IMGSENSOR_PROFILE(char *tag) {}
 ********************************************************************************/
 /*LukeHu--150703=For Kernel Build Pass*/
 extern int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSensorName, BOOL On, char *mode_name);
+extern void checkPowerBeforClose(char *mode_name);
 extern ssize_t strobe_VDIrq(void);  //cotta : add for high current solution
 /*******************************************************************************
 *
@@ -2973,6 +2974,7 @@ static int CAMERA_HW_Open(struct inode *a_pstInode, struct file *a_pstFile)
 static int CAMERA_HW_Release(struct inode *a_pstInode, struct file *a_pstFile)
 {
 	atomic_dec(&g_CamDrvOpenCnt);
+	checkPowerBeforClose(CAMERA_HW_DRVNAME1);
 
 	return 0;
 }
@@ -3885,7 +3887,6 @@ module_exit(CAMERA_HW_i2C_exit);
 MODULE_DESCRIPTION("CAMERA_HW driver");
 MODULE_AUTHOR("Jackie Su <jackie.su@Mediatek.com>");
 MODULE_LICENSE("GPL");
-
 
 
 
