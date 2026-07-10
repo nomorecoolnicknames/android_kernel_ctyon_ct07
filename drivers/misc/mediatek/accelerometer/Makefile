@@ -19,6 +19,7 @@ obj-$(CONFIG_MTK_KXTJ2_1009_NEW)   +=  KXTJ2_1009-new/
 obj-$(CONFIG_MTK_BMA250E)   +=  bma250e/
 obj-$(CONFIG_MTK_MC3410_NEW)   +=  mc3410-new/
 obj-$(CONFIG_MTK_MC3XXX_AUTO)   +=  mc3xxx_auto/
+obj-$(CONFIG_MTK_MIR3DA)   +=  mir3da/
 obj-$(CONFIG_MTK_MPU60X0)   +=  mpu60x0/
 obj-$(CONFIG_MTK_BMA255_SDO0)   +=  bma255-sdo0/
 obj-$(CONFIG_MTK_BMA255_SDO1)   +=  bma255-sdo1/
