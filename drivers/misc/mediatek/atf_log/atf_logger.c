@@ -9,7 +9,7 @@
 #include <linux/sched.h>        /* TASK_INTERRUPTIBLE/signal_pending/schedule */
 #include <linux/poll.h>
 #include <linux/io.h>           /* ioremap() */
-#include <linux/of_fdt.h>
+#include <linux/of.h>
 #include <linux/seq_file.h>
 #include <asm/setup.h>
 #include <linux/interrupt.h>
@@ -348,64 +348,26 @@ static struct miscdevice atf_log_dev = {
 	.mode       = 0644,
 };
 
-static int dt_scan_memory(unsigned long node, const char *uname, int depth, void *data)
-{
-	char *type = (char *)of_get_flat_dt_prop(node, "device_type", NULL);
-	__be32 *reg, *endp;
-	int l;
-
-	/* We are scanning "memory" nodes only */
-	if (type == NULL) {
-		/*
-		 * The longtrail doesn't have a device_type on the
-		 * /memory node, so look for the node called /memory@0.
-		 */
-		if (depth != 1 || strcmp(uname, "memory@0") != 0)
-			return 0;
-	} else if (strcmp(type, "memory") != 0)
-		return 0;
-
-	reg = (__be32 *)of_get_flat_dt_prop(node, "reg", (int *)&l);
-	if (reg == NULL)
-		return 0;
-
-	endp = reg + (l / sizeof(__be32));
-
-	while ((endp - reg) >= (dt_root_addr_cells + dt_root_size_cells)) {
-		u64 base, size;
-
-		base = dt_mem_next_cell(dt_root_addr_cells, (const __be32 **)&reg);
-		size = dt_mem_next_cell(dt_root_size_cells, (const __be32 **)&reg);
-
-		if (size == 0)
-			continue;
-		/* pr_notice( */
-		/* "[PHY layout]DRAM size (dt) :  0x%llx - 0x%llx  (0x%llx)\n", */
-		/* (unsigned long long)base, */
-		/* (unsigned long long)base + (unsigned long long)size - 1, */
-		/* (unsigned long long)size); */
-	}
-	*(unsigned long *)data = node;
-	return node;
-}
-
 unsigned long long atf_get_from_dt(unsigned long *phy_addr, unsigned int *len)
 {
-	unsigned long node = 0;
-	struct mem_desc *mem_desc = NULL;
+	struct device_node *node;
+	const struct mem_desc *mem_desc;
 
-	if (of_scan_flat_dt(dt_scan_memory, &node)) {
-		mem_desc = (struct mem_desc *)of_get_flat_dt_prop(node, "tee_reserved_mem", NULL);
-		if (mem_desc && mem_desc->size) {
-			pr_notice("ATF reserved memory: 0x%08llx - 0x%08llx (0x%llx)\n",
-					mem_desc->start, mem_desc->start+mem_desc->size - 1,
-					mem_desc->size);
-		}
-	}
-	if (mem_desc) {
+	node = of_find_node_by_type(NULL, "memory");
+	if (!node)
+		node = of_find_node_by_path("/memory@0");
+	if (!node)
+		return 0;
+
+	mem_desc = of_get_property(node, "tee_reserved_mem", NULL);
+	if (mem_desc && mem_desc->size) {
+		pr_notice("ATF reserved memory: 0x%08llx - 0x%08llx (0x%llx)\n",
+			 mem_desc->start, mem_desc->start + mem_desc->size - 1,
+			 mem_desc->size);
 		*phy_addr = mem_desc->start;
 		*len = mem_desc->size;
 	}
+	of_node_put(node);
 	return 0;
 }
 
@@ -601,4 +563,3 @@ module_exit(atf_log_exit);
 
 MODULE_DESCRIPTION("MEDIATEK Module ATF Logging Driver");
 MODULE_AUTHOR("Ji Zhang<ji.zhang@mediatek.com>");
-

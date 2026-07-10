@@ -54,7 +54,6 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/regulator/machine.h>
 #include <linux/of_device.h>
-#include <linux/of_fdt.h>
 #endif
 #include <asm/uaccess.h>
 
@@ -4673,21 +4672,11 @@ static DEVICE_ATTR(dlpt_level, 0664, show_dlpt_level, store_dlpt_level);	/*664 *
 /*****************************************************************************
  * system function
  ******************************************************************************/
-#ifdef DLPT_FEATURE_SUPPORT
-static unsigned long pmic_node;
-
-static int fb_early_init_dt_get_chosen(unsigned long node, const char *uname, int depth, void *data)
-{
-	if (depth != 1 || (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
-		return 0;
-	pmic_node = node;
-	return 1;
-}
-#endif				/*end of #ifdef DLPT_FEATURE_SUPPORT */
 static int pmic_mt_probe(struct platform_device *dev)
 {
 	int ret_device_file = 0, i;
 #ifdef DLPT_FEATURE_SUPPORT
+	struct device_node *chosen;
 	const int *pimix;
 	int len = 0;
 #endif
@@ -4712,14 +4701,20 @@ static int pmic_mt_probe(struct platform_device *dev)
 	pmic_suspend_state = false;
 #ifdef DLPT_FEATURE_SUPPORT
 	pimix = NULL;
-	if (of_scan_flat_dt(fb_early_init_dt_get_chosen, NULL) > 0)
-		pimix = of_get_flat_dt_prop(pmic_node, "atag,imix_r", &len);
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		chosen = of_find_node_by_path("/chosen@0");
+	if (chosen)
+		pimix = of_get_property(chosen, "atag,imix_r", &len);
+	if (len < sizeof(*pimix))
+		pimix = NULL;
 	if (pimix == NULL) {
 		pr_err(" pimix==NULL len=%d\n", len);
 	} else {
 		pr_err(" pimix=%d\n", *pimix);
 		ptim_rac_val_avg = *pimix;
 	}
+	of_node_put(chosen);
 
 	PMICLOG("******** MT pmic driver probe!! ********%d\n", ptim_rac_val_avg);
 	pr_debug("[PMIC]pmic_mt_probe %s %s\n", dev->name, dev->id_entry->name);

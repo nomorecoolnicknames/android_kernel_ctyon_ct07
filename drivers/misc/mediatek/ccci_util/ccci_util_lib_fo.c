@@ -18,7 +18,6 @@
 
 #ifdef CONFIG_OF
 #include <linux/of.h>
-#include <linux/of_fdt.h>
 #endif
 #ifdef CONFIG_OF_RESERVED_MEM
 #include <linux/of_reserved_mem.h>
@@ -130,27 +129,22 @@ int ccci_get_fo_setting(char item[], unsigned int *val)
 }
 
 /*--- LK tag and device tree ----- */
-static unsigned long dt_chosen_node;
-static int __init early_init_dt_get_chosen(unsigned long node, const char *uname, int depth, void *data)
-{
-	if (depth != 1 || (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
-		return 0;
-	dt_chosen_node = node;
-	return 1;
-}
-
 static void lk_meta_tag_info_collect(void)
 {
-	/* Device tree method */
-	char *tags;
-	int ret;
-	ret = of_scan_flat_dt(early_init_dt_get_chosen, NULL);
-	if (ret == 0) {
+	struct device_node *chosen;
+	const unsigned char *tags;
+	int len = 0;
+
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		chosen = of_find_node_by_path("/chosen@0");
+	if (!chosen) {
 		CCCI_UTIL_INF_MSG("device node no chosen node\n");
 		return;
 	}
-	tags = (char *)of_get_flat_dt_prop(dt_chosen_node, "atag,mdinfo", NULL);
-	if (tags) {
+
+	tags = of_get_property(chosen, "atag,mdinfo", &len);
+	if (tags && len >= 12) {
 		tags += 8;	/* Fix me, Arm64 doesn't have atag defination now */
 		md_info_tag_val[0] = tags[0];
 		md_info_tag_val[1] = tags[1];
@@ -162,8 +156,9 @@ static void lk_meta_tag_info_collect(void)
 		CCCI_UTIL_INF_MSG("md_inf[2]=%d\n", md_info_tag_val[2]);
 		CCCI_UTIL_INF_MSG("md_inf[3]=%d\n", md_info_tag_val[3]);
 	} else {
-		CCCI_UTIL_INF_MSG("atag,mdinfo=NULL\n");
+		CCCI_UTIL_INF_MSG("atag,mdinfo missing or truncated\n");
 	}
+	of_node_put(chosen);
 }
 
 /*--- META arguments parse ------- */

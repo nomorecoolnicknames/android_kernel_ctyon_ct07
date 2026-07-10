@@ -12,7 +12,6 @@
 #include <linux/semaphore.h>
 #include <linux/mutex.h>
 #include <linux/suspend.h>
-#include <linux/of_fdt.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/dma-buf.h>
@@ -1973,21 +1972,15 @@ unsigned int islcmconnected = 0;
 unsigned int vramsize = 0;
 phys_addr_t fb_base = 0;
 static int is_videofb_parse_done;
-static unsigned long video_node;
-
-static int fb_early_init_dt_get_chosen(unsigned long node, const char *uname, int depth, void *data)
-{
-	if (depth != 1 || (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
-		return 0;
-
-	video_node = node;
-	return 1;
-}
 
 /* Retrun value: 0: success, 1: fail */
 int _parse_tag_videolfb(void)
 {
-	struct tag_videolfb *videolfb_tag = NULL;
+	struct device_node *chosen;
+	const struct tag_videolfb *videolfb_tag;
+	size_t lcm_name_bytes;
+	size_t lcm_name_len;
+	int len = 0;
 	/* not necessary */
 	/* DISPCHECK("[DT][videolfb]isvideofb_parse_done = %d\n",is_videofb_parse_done); */
 
@@ -1998,12 +1991,17 @@ int _parse_tag_videolfb(void)
 	return 1;
 #endif
 
-	if (of_scan_flat_dt(fb_early_init_dt_get_chosen, NULL) > 0) {
-		videolfb_tag = (struct tag_videolfb *)of_get_flat_dt_prop(video_node, "atag,videolfb", NULL);
-		if (videolfb_tag) {
-			memset((void *)mtkfb_lcm_name, 0, sizeof(mtkfb_lcm_name));
-			strcpy((char *)mtkfb_lcm_name, videolfb_tag->lcmname);
-			mtkfb_lcm_name[strlen(videolfb_tag->lcmname)] = '\0';
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		chosen = of_find_node_by_path("/chosen@0");
+	if (chosen) {
+		videolfb_tag = of_get_property(chosen, "atag,videolfb", &len);
+		if (videolfb_tag && len > offsetof(struct tag_videolfb, lcmname)) {
+			lcm_name_bytes = len - offsetof(struct tag_videolfb, lcmname);
+			lcm_name_len = strnlen(videolfb_tag->lcmname, lcm_name_bytes);
+			lcm_name_len = min(lcm_name_len, sizeof(mtkfb_lcm_name) - 1);
+			memcpy(mtkfb_lcm_name, videolfb_tag->lcmname, lcm_name_len);
+			mtkfb_lcm_name[lcm_name_len] = '\0';
 
 			lcd_fps = videolfb_tag->fps;
 			if (0 == lcd_fps)
@@ -2013,6 +2011,7 @@ int _parse_tag_videolfb(void)
 			vramsize = videolfb_tag->vram;
 			fb_base = videolfb_tag->fb_base;
 			is_videofb_parse_done = 1;
+			of_node_put(chosen);
 			DISPPRINT("[DT][videolfb] lcmfound=%d, fps=%d, fb_base=%p, vram=%d, lcmname=%s\n",
 			     islcmconnected, lcd_fps, (void *)fb_base, vramsize, mtkfb_lcm_name);
 #if 0
@@ -2025,7 +2024,8 @@ int _parse_tag_videolfb(void)
 			return 0;
 		}
 
-		DISPCHECK("[DT][videolfb] videolfb_tag not found\n");
+		of_node_put(chosen);
+		DISPCHECK("[DT][videolfb] videolfb_tag not found or truncated\n");
 		return 1;
 	}
 

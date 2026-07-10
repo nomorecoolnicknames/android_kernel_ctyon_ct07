@@ -16,9 +16,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/of.h>
-#ifdef CONFIG_OF
-#include <linux/of_fdt.h>
-#endif
 #include <asm/setup.h>
 #include <linux/atomic.h>
 #include <mt-plat/mt_boot_reason.h>
@@ -36,37 +33,12 @@ static atomic_t g_br_state = ATOMIC_INIT(BOOT_REASON_UNINIT);
 static atomic_t g_br_errcnt = ATOMIC_INIT(0);
 static atomic_t g_br_status = ATOMIC_INIT(0);
 
-#ifdef CONFIG_OF
-static int __init dt_get_boot_reason(unsigned long node, const char *uname, int depth, void *data)
-{
-	char *ptr = NULL, *br_ptr = NULL;
-
-	if (depth != 1 || (strcmp(uname, "chosen") != 0 && strcmp(uname, "chosen@0") != 0))
-		return 0;
-
-	ptr = (char *)of_get_flat_dt_prop(node, "bootargs", NULL);
-	if (ptr) {
-		br_ptr = strstr(ptr, "boot_reason=");
-		if (br_ptr != 0) {
-			g_boot_reason = br_ptr[12] - '0';	/* get boot reason */
-			atomic_set(&g_br_status, 1);
-		} else {
-			pr_warn("'boot_reason=' is not found\n");
-		}
-		pr_debug("%s\n", ptr);
-	} else
-		pr_warn("'bootargs' is not found\n");
-
-	/* break now */
-	return 1;
-}
-#endif
-
-
 void init_boot_reason(unsigned int line)
 {
 #ifdef CONFIG_OF
-	int rc;
+	struct device_node *chosen;
+	const char *ptr;
+	char *br_ptr;
 
 	if (BOOT_REASON_INITIALIZING == atomic_read(&g_br_state)) {
 		pr_warn("%s (%d) state(%d)\n", __func__, line, atomic_read(&g_br_state));
@@ -86,11 +58,30 @@ void init_boot_reason(unsigned int line)
 	}
 
 	pr_debug("%s %d %d %d\n", __func__, line, g_boot_reason, atomic_read(&g_br_state));
-	rc = of_scan_flat_dt(dt_get_boot_reason, NULL);
-	if (0 != rc)
-		atomic_set(&g_br_state, BOOT_REASON_INITIALIZED);
-	else
+	chosen = of_find_node_by_path("/chosen");
+	if (!chosen)
+		chosen = of_find_node_by_path("/chosen@0");
+	if (!chosen) {
+		pr_warn("chosen node is not found\n");
 		atomic_set(&g_br_state, BOOT_REASON_UNINIT);
+		return;
+	}
+
+	ptr = of_get_property(chosen, "bootargs", NULL);
+	if (ptr) {
+		br_ptr = strstr(ptr, "boot_reason=");
+		if (br_ptr) {
+			g_boot_reason = br_ptr[12] - '0';
+			atomic_set(&g_br_status, 1);
+		} else {
+			pr_warn("'boot_reason=' is not found\n");
+		}
+		pr_debug("%s\n", ptr);
+	} else {
+		pr_warn("'bootargs' is not found\n");
+	}
+	of_node_put(chosen);
+	atomic_set(&g_br_state, BOOT_REASON_INITIALIZED);
 	pr_debug("%s %d %d %d\n", __func__, line, g_boot_reason, atomic_read(&g_br_state));
 #endif
 }
