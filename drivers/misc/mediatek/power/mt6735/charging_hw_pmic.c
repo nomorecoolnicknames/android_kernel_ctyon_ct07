@@ -693,7 +693,7 @@ signed int chr_control_interface(CHARGING_CTRL_CMD cmd, void *data)
 		charging_func[CHARGING_CMD_SET_ERROR_STATE] = charging_set_error_state;
 	}
 
-	if (cmd < CHARGING_CMD_NUMBER)
+	if ((unsigned int)cmd < CHARGING_CMD_NUMBER && charging_func[cmd])
 		status = charging_func[cmd] (data);
 	else
 		return STATUS_UNSUPPORTED;

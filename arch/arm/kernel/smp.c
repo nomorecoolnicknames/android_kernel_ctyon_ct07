@@ -369,7 +369,8 @@ static void smp_store_cpu_info(unsigned int cpuid)
 asmlinkage void secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
-	unsigned int cpu;
+	/* Stock passes zero to the two pre-smp_processor_id AEE breadcrumbs. */
+	unsigned int cpu = 0;
 
 	aee_rr_rec_hoplug(cpu, 1, 0);
 

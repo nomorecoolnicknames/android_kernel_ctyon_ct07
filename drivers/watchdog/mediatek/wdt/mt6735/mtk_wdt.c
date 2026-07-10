@@ -117,7 +117,6 @@ void mtk_wdt_set_time_out_value(unsigned int value)
 	#ifndef CONFIG_KICK_SPM_WDT
 	unsigned int tmp;
 	#endif
-	wdt_en = FALSE;
 	spin_lock(&rgu_reg_operation_spinlock);
 	#ifdef CONFIG_KICK_SPM_WDT
 	if (wdt_en == TRUE) {
@@ -179,7 +178,6 @@ int mtk_wdt_enable(enum wk_wdt_en en)
 {
 	unsigned int tmp = 0;
 
-	en = WK_WDT_DIS;
 	spin_lock(&rgu_reg_operation_spinlock);
     #ifdef CONFIG_KICK_SPM_WDT
 	if (WK_WDT_EN == en) {

@@ -32,7 +32,9 @@ struct ct07_lcm_spi_ctx {
 
 static DEFINE_MUTEX(ct07_lcm_spi_lock);
 static struct ct07_lcm_spi_ctx *ct07_lcm_spi;
+#ifdef CONFIG_CT07_BRINGUP
 static const char *ct07_lcm_diag_stage_name = "pre_init";
+#endif
 static struct mt_chip_conf ct07_lcm_spi_conf = {
 	.setuptime = 2,
 	.holdtime = 2,
@@ -69,11 +71,14 @@ static struct spi_board_info ct07_lcm_spi_board_info[] __initdata = {
 
 void ct07_lcm_diag_stage(const char *stage)
 {
+#ifdef CONFIG_CT07_BRINGUP
 	ct07_lcm_diag_stage_name = stage ? stage : "null";
 	pr_notice("[CT07_DIAG] stage=%s\n", ct07_lcm_diag_stage_name);
+#endif
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_diag_stage);
 
+#ifdef CONFIG_CT07_BRINGUP
 static int ct07_lcm_reboot_notify(struct notifier_block *nb,
 				  unsigned long action, void *data)
 {
@@ -96,6 +101,7 @@ static void ct07_lcm_diag_workfn(struct work_struct *work)
 		  ct07_lcm_diag_stage_name, ct07_lcm_spi ? 1 : 0);
 	schedule_delayed_work(&ct07_lcm_diag_work, 5 * HZ);
 }
+#endif
 
 static int ct07_lcm_spi_lookup_state(struct device *dev,
 				     struct pinctrl *pinctrl,
@@ -155,7 +161,7 @@ static int ct07_lcm_spi_select(struct ct07_lcm_spi_ctx *ctx,
 }
 
 static int ct07_lcm_spi_xfer(const unsigned char *data, unsigned int len,
-			     struct pinctrl_state *rs_state)
+				     bool rs_high)
 {
 	struct spi_transfer xfer = {
 		.tx_buf = data,
@@ -179,11 +185,12 @@ static int ct07_lcm_spi_xfer(const unsigned char *data, unsigned int len,
 		return -ENODEV;
 	}
 
-	ret = ct07_lcm_spi_select(ctx, rs_state);
+	ret = ct07_lcm_spi_select(ctx,
+				  rs_high ? ctx->lcd_rs_high : ctx->lcd_rs_low);
 	if (ret) {
-		mutex_unlock(&ct07_lcm_spi_lock);
 		ct07_lcm_diag_stage("spi_rs_select_failed");
 		dev_err(&ctx->spi->dev, "[CT07_LCM_SPI] rs select failed: %d\n", ret);
+		mutex_unlock(&ct07_lcm_spi_lock);
 		return ret;
 	}
 
@@ -202,27 +209,14 @@ static int ct07_lcm_spi_xfer(const unsigned char *data, unsigned int len,
 int ct07_lcm_spi_send_cmd(unsigned int cmd)
 {
 	unsigned char value = cmd & 0xff;
-	struct ct07_lcm_spi_ctx *ctx = ct07_lcm_spi;
 
-	if (!ctx) {
-		ct07_lcm_diag_stage("spi_cmd_no_ctx");
-		return -ENODEV;
-	}
-
-	return ct07_lcm_spi_xfer(&value, 1, ctx->lcd_rs_low);
+	return ct07_lcm_spi_xfer(&value, 1, false);
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_cmd);
 
 int ct07_lcm_spi_send_data(const unsigned char *data, unsigned int len)
 {
-	struct ct07_lcm_spi_ctx *ctx = ct07_lcm_spi;
-
-	if (!ctx) {
-		ct07_lcm_diag_stage("spi_data_no_ctx");
-		return -ENODEV;
-	}
-
-	return ct07_lcm_spi_xfer(data, len, ctx->lcd_rs_high);
+	return ct07_lcm_spi_xfer(data, len, true);
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_data);
 
@@ -265,9 +259,21 @@ static int ct07_lcm_spi_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	ct07_lcm_spi_select(ctx, ctx->lcd_cs_mode);
-	ct07_lcm_spi_select(ctx, ctx->lcd_clk_mode);
-	ct07_lcm_spi_select(ctx, ctx->lcd_data_mode);
+	ret = ct07_lcm_spi_select(ctx, ctx->lcd_cs_mode);
+	if (ret) {
+		dev_err(&spi->dev, "[CT07_LCM_SPI] cs mode select failed: %d\n", ret);
+		return ret;
+	}
+	ret = ct07_lcm_spi_select(ctx, ctx->lcd_clk_mode);
+	if (ret) {
+		dev_err(&spi->dev, "[CT07_LCM_SPI] clk mode select failed: %d\n", ret);
+		return ret;
+	}
+	ret = ct07_lcm_spi_select(ctx, ctx->lcd_data_mode);
+	if (ret) {
+		dev_err(&spi->dev, "[CT07_LCM_SPI] data mode select failed: %d\n", ret);
+		return ret;
+	}
 
 	spi->controller_data = &ct07_lcm_spi_conf;
 	spi->mode = SPI_MODE_0;
@@ -322,8 +328,10 @@ static int __init ct07_lcm_spi_init(void)
 	int ret;
 
 	ct07_lcm_diag_stage("spi_initcall");
+#ifdef CONFIG_CT07_BRINGUP
 	register_reboot_notifier(&ct07_lcm_reboot_nb);
 	schedule_delayed_work(&ct07_lcm_diag_work, 5 * HZ);
+#endif
 	spi_register_board_info(ct07_lcm_spi_board_info,
 				ARRAY_SIZE(ct07_lcm_spi_board_info));
 	ct07_lcm_diag_stage("spi_board_info");

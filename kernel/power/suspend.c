@@ -495,7 +495,7 @@ int suspend_syssync_enqueue(void)
  * Fail if that's not the case.  Otherwise, prepare for system suspend, make the
  * system enter the given sleep state and clean up after wakeup.
  */
-static int enter_state(suspend_state_t state)
+static int __maybe_unused enter_state(suspend_state_t state)
 {
 	int error;
 
@@ -553,7 +553,7 @@ static int enter_state(suspend_state_t state)
 	return error;
 }
 
-static void pm_suspend_marker(char *annotation)
+static void __maybe_unused pm_suspend_marker(char *annotation)
 {
 	struct timespec ts;
 	struct rtc_time tm;
@@ -574,6 +574,7 @@ static void pm_suspend_marker(char *annotation)
  */
 int pm_suspend(suspend_state_t state)
 {
+#ifdef CONFIG_CT07_BRINGUP
 	static bool ct07_suspend_caller_dumped;
 
 	pr_notice("[CT07] pm_suspend(%d) blocked - keep recovery alive\n", state);
@@ -587,5 +588,22 @@ int pm_suspend(suspend_state_t state)
 		dump_stack();
 	}
 	return 0;
+#else
+	int error;
+
+	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
+		return -EINVAL;
+
+	pm_suspend_marker("entry");
+	error = enter_state(state);
+	if (error) {
+		suspend_stats.fail++;
+		dpm_save_failed_errno(error);
+	} else {
+		suspend_stats.success++;
+	}
+	pm_suspend_marker("exit");
+	return error;
+#endif
 }
 EXPORT_SYMBOL(pm_suspend);
