@@ -36,3 +36,4 @@ zImage-dtb
 .ccache*
 *.pyc
 __pycache__/
+.omc/

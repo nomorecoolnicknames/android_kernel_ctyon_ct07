@@ -1,10 +1,40 @@
 # CT07 — мастер-план переработки ядра и дерева устройства
 
-Дата: 2026-07-06. Статус: **PROPOSED** (ждёт подтверждения пользователя).
+Дата: 2026-07-06, обновлено 2026-07-09. Статус: **DEVICE-FREE WORK
+IMPLEMENTED; LIVE GATES PENDING**.
 Автор: Claude (аудит всего дерева `/srv/forge/android/ctyon` + всех 3018 строк
 `BRINGUP_STATE.md` + истории kernel-репозитория).
 For agents: this is the master rework plan for the CT07 bring-up; execute in
 the order of section 10; evidence rules of `AGENTS.md`/`CLAUDE.md` apply.
+
+---
+
+## Обновление исполнения 2026-07-09
+
+Снимки HEAD/конфига/артефактов ниже сохранены как история исходного плана.
+Текущее состояние после полного повторного аудита:
+
+- скрипт сборки фиксирует toolchain, точное состояние source, build log и
+  манифест; опасные/reused build ID запрещены;
+- `ct07_defconfig` и `ct07_bringup_defconfig` разделены: production возвращает
+  KPOC и suspend, диагностические трассировки/USB force/heartbeat остаются
+  только в bring-up; штатный WDT включён в обоих профилях;
+- в обоих профилях удалены доказанные фантомные драйверы (нештатные
+  ALS/gyro/magnetometer/NFC/touch/lens/Pump Express), восстановлены stock
+  Passpoint/C2K/SBP флаги;
+- DA226/MIR3DA добавлен и выровнен с CT07 DT (`mediatek,gsensor`, I2C `0x26`,
+  семь base attrs); отдельным риском остаётся частный stock factory-ioctl ABI;
+- SP0A09 power wiring, PDN polarity, I2C speed, mode constants, Bayer order,
+  init table, stream/test-pattern paths и rail cleanup выровнены по точному
+  CT07 `vmlinux.elf`;
+- диагностический p8 образ имеет уникальный marker, host-verified упаковку и
+  600-секундный emergency timer; аппаратный WDT остаётся последней защитой
+  при зависании. Фактический возврат в p7 всё равно является live gate.
+
+Ни один новый бинарник этого состояния ещё не прошивался. Gate G1, USB,
+экран, DA226, камера, modem/RIL, питание, suspend/resume и длительная
+стабильность остаются аппаратными проверками; точная матрица ведётся в
+верхнем `docs/KERNEL_READINESS_CT07.md`.
 
 ---
 
@@ -209,24 +239,24 @@ adb ... exec-out 'cat /dev/block/mmcblk0p8' | sha256sum        # readback тол
 
 ## 6. Фаза 3 — Продуктизация ядра (после G1)
 
-- **3.1 `CONFIG_CT07_BRINGUP`** (+cmdline-флаги) — перевести под него все хаки:
-  WDT-off, KPOC-override, pm_suspend-block, restart tracer, USB-форсы.
-  Прод-профиль = стоковое поведение.
-- **3.2 WDT вернуть** в прод-профиле. RE выполнен 2026-07-09
+- **3.1 `CONFIG_CT07_BRINGUP` — ВЫПОЛНЕНО 2026-07-09.** Под флагом оставлены
+  KPOC-override, pm_suspend-block, restart tracer, USB-форсы и диагностический
+  2-секундный kicker. Production-профиль возвращает KPOC и suspend. Старый
+  пункт про `WDT-off` отменён: аппаратный WDT включён в обоих профилях.
+- **3.2 WDT — ПЕРЕПРОВЕРЕНО И ВКЛЮЧЕНО В ОБОИХ ПРОФИЛЯХ.** RE выполнен 2026-07-09
   (`kernel-reverse/wdt-stock-vs-source-20260709.md`). Гипотеза «разница
   конфигурации wd_kicker/таймаута» **ОТВЕРГНУТА**: сток и источник настраивают
   WDT побитово одинаково (probe→enable, 30с, dual-mode, kicker `wdtk-N` каждые
   20с; live-dmesg стока: кик каждые 20с до 429с при взведённом WDT). Реальная
-  причина (INFERENCE): на источнике kicker перестаёт планироваться в окне
-  ~10–17с (то же, что suspend/KPOC), WDT остаётся взведён → cold reset +30с =
-  35–47с. Прод-фикс: убрать два форс-присвоения в `mtk_wdt.c`
-  (`wdt_en=FALSE`, `WK_WDT_DIS`) под `#ifdef CONFIG_CT07_BRINGUP`; конфиги
-  `CONFIG_MTK_WATCHDOG=y`+`CONFIG_MTK_WD_KICKER=y` и таймаут 30с не трогать.
-  Плюс: убрать/загейтить лишний in-kernel 2с `ct07wdt`-kicker (init/main.c) в
-  проде — он дублирует WDK и глушит per-CPU детект зависания. Порядок: сначала
-  WDT-on при ещё заблокированном suspend (низкий риск, это состояние жило до
-  157с), ТОЛЬКО потом возвращать suspend (3.4) с маркерами вокруг
-  suspend_enter/spm_go_to_sleep/wd_suspend_notify.
+  причина (INFERENCE): на старом источнике kicker переставал планироваться в
+  окне ~10–17с (то же, что suspend/KPOC), WDT оставался взведён → cold reset
+  +30с = 35–47с. Реализованный фикс удаляет оба форс-отключения из
+  `mtk_wdt.c`; `CONFIG_MTK_WATCHDOG=y`, `CONFIG_MTK_WD_KICKER=y` и штатный
+  таймаут сохранены. Дополнительный 2-секундный `ct07wdt` и 600-секундный
+  emergency timer существуют только в bring-up; production их не содержит.
+  Старое указание поместить `wdt_en=FALSE`/`WK_WDT_DIS` под bring-up-флаг
+  **явно отменено**: его возврат снова создаст непредсказуемый чёрный экран без
+  аппаратного fallback.
 - **3.2a Открытый вопрос — инициатор suspend.** Что вообще запускает suspend на
   источнике, НЕИЗВЕСТНО (в рамдиске нет писателя `/sys/power/*`, в дереве нет
   вызова pm_suspend). Добавлен одноразовый `dump_stack()` в `pm_suspend()`

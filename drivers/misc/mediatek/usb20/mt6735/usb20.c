@@ -1161,7 +1161,7 @@ static int mt_usb_init(struct musb *musb)
 	musb->is_host = false;
 	musb->fifo_size = 8 * 1024;
 
-#ifndef FPGA_PLATFORM
+#if defined(CONFIG_CT07_BRINGUP) && !defined(FPGA_PLATFORM)
 	set_usb_rdy();
 	DBG(0, "[CT07_USB] early set_usb_rdy in mt_usb_init\n");
 #endif

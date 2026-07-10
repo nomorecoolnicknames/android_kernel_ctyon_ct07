@@ -79,6 +79,8 @@
 #include <linux/random.h>
 #include <linux/list.h>
 #include <linux/suspend.h>
+#include <linux/reboot.h>
+#include <linux/timer.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -714,14 +716,37 @@ static void __init do_ctors(void)
 bool initcall_debug;
 core_param(initcall_debug, initcall_debug, bool, 0644);
 
+#ifdef CONFIG_CT07_BRINGUP
+
 extern int ipanic_write_size(void *buf, int off, int len);
 
 #define CT07_EXPDB_MARK_OFF 0x9f0000
 #define CT07_EXPDB_MARK_LEN 512
-#define CT07_WDT_DIAG_SECONDS 120
 #define CT07_WDT_DIAG_INTERVAL_MS 2000
 
 static char ct07_expdb_mark_buf[CT07_EXPDB_MARK_LEN] __aligned(512);
+static unsigned int ct07_reboot_after;
+static struct timer_list ct07_reboot_timer;
+
+static int __init ct07_reboot_after_setup(char *str)
+{
+	unsigned int seconds;
+
+	if (!str || kstrtouint(str, 0, &seconds) || seconds < 600 ||
+	    seconds > 1800)
+		return -EINVAL;
+
+	ct07_reboot_after = seconds;
+	return 0;
+}
+early_param("ct07_reboot_after", ct07_reboot_after_setup);
+
+static void ct07_reboot_timer_fn(unsigned long unused)
+{
+	pr_emerg("[CT07_FAILSAFE] emergency warm reboot after %u seconds\n",
+		 ct07_reboot_after);
+	emergency_restart();
+}
 
 static bool ct07_diag_enabled(void)
 {
@@ -753,7 +778,10 @@ static int ct07_wdt_diag_thread(void *unused)
 	/* CT07: kick the watchdog FOREVER so recovery userspace stays alive
 	 * long enough to bring up adb / be inspected. The bounded window was
 	 * only useful for the early-hang diagnostic; now the kernel reaches
-	 * userspace and we must prevent the ~30s HW-WDT fallback. */
+	 * userspace and we must prevent the ~30s HW-WDT fallback. A test image
+	 * can request an emergency warm reboot with
+	 * ct07_reboot_after=<600..1800>. This attempts a default warm reboot;
+	 * actual arrival in the p7 fallback still requires live proof. */
 	for (elapsed = 0; ; elapsed += CT07_WDT_DIAG_INTERVAL_MS / 1000) {
 		if (kthread_should_stop())
 			break;
@@ -775,6 +803,13 @@ static void ct07_wdt_diag_start(void)
 		return;
 
 	started = true;
+	if (ct07_reboot_after) {
+		pr_notice("[CT07_FAILSAFE] armed for %u seconds\n",
+			  ct07_reboot_after);
+		setup_timer(&ct07_reboot_timer, ct07_reboot_timer_fn, 0);
+		mod_timer(&ct07_reboot_timer,
+			  jiffies + ct07_reboot_after * HZ);
+	}
 	ct07_diag_wdt_kick("start");
 	tsk = kthread_run(ct07_wdt_diag_thread, NULL, "ct07wdt");
 	if (IS_ERR(tsk))
@@ -804,6 +839,19 @@ static void ct07_expdb_mark(const char *phase, initcall_t fn,
 	ipanic_write_size(ct07_expdb_mark_buf, CT07_EXPDB_MARK_OFF,
 			  CT07_EXPDB_MARK_LEN);
 }
+
+#else
+
+static inline void ct07_wdt_diag_start(void)
+{
+}
+
+static inline void ct07_expdb_mark(const char *phase, initcall_t fn,
+				   int ret, unsigned long long ns)
+{
+}
+
+#endif /* CONFIG_CT07_BRINGUP */
 
 #ifdef CONFIG_KALLSYMS
 struct blacklist_entry {

@@ -13,6 +13,15 @@ config MTK_PLATFORM
 config ARCH_MTK_PROJECT
 	string "MTK project name"
 
+config CT07_BRINGUP
+	bool "CT07 bring-up safety and diagnostics"
+	default n
+	help
+	  Enable CT07-only boot diagnostics and temporary recovery safeguards:
+	  an extra watchdog kicker (the stock hardware watchdog remains armed),
+	  KPOC override, suspend blocking, restart traces, and an optional timed
+	  emergency warm reboot. Production kernels must leave this disabled.
+
 config MTK_LEGACY
 	bool "MTK LEGACY driver API support"
 	help
