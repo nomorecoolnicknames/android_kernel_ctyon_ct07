@@ -439,3 +439,34 @@ without `-S` against its exact `vmlinux.o` and require empty output. Package
 only the bring-up manifest as `fix2a006`, verify its full 16 MiB SHA/readback,
 then run `scripts/capture_ct07_g1.sh fix2a006 <p8-sha> <p7-sha>` on the current
 explicit ADB port.
+
+### 2026-09-02 — 39e8861f: disable the BATON battery-presence check (stock alignment)
+
+- **Category:** PROPER-FIX (stock = hardware truth, AGENTS.md rule 6).
+- **Hypothesis:** with a USB cable attached the source kernel can power the
+  phone off from `battery_common.c`: `check_battery_exist()` (probe of the
+  charger-hv workaround + charger-detect paths) → three
+  `RGS_BATON_UNDET` reads → `charging_set_power_off()` → `kernel_power_off()`.
+  The stock kernel never takes that path. Whether this is the ~150 s
+  power-off of 2026-09-01 is a HYPOTHESIS (see ctyon `BRINGUP_STATE.md`
+  2026-09-02 for the competing ones: charger-type detection, Tbat ≥ 60).
+- **Evidence:** stock TWRP boot log
+  `ctyon/out/ct07-live-20260901/rom-attempt-1/last_kmsg.txt:309`
+  `[    9.219321] … [BATTERY] Disable check battery exist.`; stock kernel
+  binary (`boot-stock.bin`, gzip @16943): "Disable check battery exist" ×1,
+  "Battery is not exist, power off" ×0; `out/kernel-builds/bringup-xperms-20260831/vmlinux`
+  (84d62559): ×0 / ×1; stock `ProjectConfig.mk:267`
+  `MTK_DISABLE_POWER_ON_OFF_VOLTAGE_LIMITATION = no` (the only path that
+  defined the macro in this tree), so the vendor defined it directly.
+- **Files:** `mach/mt_charging.h` — map Kconfig `CONFIG_CONFIG_DIS_CHECK_BATTERY`
+  onto `CONFIG_DIS_CHECK_BATTERY`; `ct07_defconfig`, `ct07_bringup_defconfig`
+  — set it (verified in the expanded `.config`).
+- **Build:** `bringup-batcheck-20260902`, `zImage-dtb`
+  `ba598e1bb2a98279a2dbbb14314abd8d86737d9fa684f680e7404ed5df8c28af`, vmlinux
+  strings now the stock pair (1/0).
+- **Expected next marker:** `[BATTERY] Disable check battery exist.` at ~9.2 s
+  in the `ct07_reboot_after=100` last_kmsg; no "Battery is not exist"; device
+  alive past 150 s.
+- **Rollback:** revert if the device still powers off at ~150 s and last_kmsg
+  names another caller, or if charging/battery behaviour regresses vs stock.
+- **Verification:** `grep -n "Disable check battery exist\|Battery is not exist\|charging_set_power_off\|CT07_FAILSAFE" /proc/last_kmsg` in TWRP after the warm reboot.
