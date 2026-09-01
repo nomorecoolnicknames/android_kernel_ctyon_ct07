@@ -99,6 +99,22 @@
 #define CONFIG_DIS_CHECK_BATTERY
 #endif
 
+/*
+ * drivers/power/mediatek/Kconfig declares the knob as
+ * "config CONFIG_DIS_CHECK_BATTERY", so a defconfig line
+ * CONFIG_CONFIG_DIS_CHECK_BATTERY=y produces the macro
+ * CONFIG_CONFIG_DIS_CHECK_BATTERY, while battery_common.c tests
+ * CONFIG_DIS_CHECK_BATTERY. Map the Kconfig symbol onto the macro the code
+ * reads. CT07 sets it: the stock kernel logs
+ * "[BATTERY] Disable check battery exist." and does not contain the
+ * "Battery is not exist, power off" string, i.e. the vendor build never runs
+ * check_battery_exist() on this board (no BATON detection wired to the
+ * battery).
+ */
+#if defined(CONFIG_CONFIG_DIS_CHECK_BATTERY) && !defined(CONFIG_DIS_CHECK_BATTERY)
+#define CONFIG_DIS_CHECK_BATTERY
+#endif
+
 #ifdef CONFIG_MTK_FAN5405_SUPPORT
 #define FAN5405_BUSNUM 1
 #endif
