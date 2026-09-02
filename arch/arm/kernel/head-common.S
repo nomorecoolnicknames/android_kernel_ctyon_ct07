@@ -78,7 +78,38 @@ ENDPROC(__vet_atags)
  *  r9  = processor ID
  */
 	__INIT
+
+#ifdef CONFIG_CT07_BRINGUP
+#define CT07_RAM_CONSOLE_VA	0xC3F00000	/* 0x43F00000 - PHYS_OFFSET + PAGE_OFFSET */
+/*
+ * The VA is the 1 MiB strongly-ordered section __create_page_tables adds
+ * for CONFIG_CT07_BRINGUP (arch/arm/kernel/head.S), so the stores below go
+ * straight to DRAM and survive the watchdog reset. With the earlier
+ * write-back mapping they parked in L1/L2 and were lost with the reset.
+ */
+	.macro	ct07_stamp_va, stage, ra, rb, rc
+	ldr	\ra, =CT07_RAM_CONSOLE_VA
+	add	\ra, \ra, #0x200
+	mov	\rc, #\stage
+	orr	\rc, \rc, \rc, lsl #8
+	orr	\rc, \rc, \rc, lsl #16
+	mov	\rb, #128
+9003:	str	\rc, [\ra], #4
+	subs	\rb, \rb, #1
+	bne	9003b
+	dsb
+	.endm
+#else
+	.macro	ct07_stamp_va, stage, ra, rb, rc
+	.endm
+#endif
+
 __mmap_switched:
+	@ CT07: r0 = control register, r1 = machine type, r2 = atags/DTB pointer
+	@ are live until the stores below (__machine_arch_type, __atags_pointer,
+	@ cr_alignment); r9 = cpuid, r3 = data pointer between the stamps.
+	@ r10-r12 are dead here, so the stamps use only those.
+	ct07_stamp_va 0xA4, r10, r11, r12	@ CT07: MMU on, before data copy/BSS clear
 	adr	r3, __mmap_switched_data
 
 	ldmia	r3!, {r4, r5, r6, r7}
@@ -93,6 +124,8 @@ __mmap_switched:
 	strcc	fp, [r6],#4
 	bcc	1b
 
+	ct07_stamp_va 0xA5, r10, r11, r12	@ CT07: BSS cleared
+
  ARM(	ldmia	r3, {r4, r5, r6, r7, sp})
  THUMB(	ldmia	r3, {r4, r5, r6, r7}	)
  THUMB(	ldr	sp, [r3, #16]		)
@@ -101,6 +134,7 @@ __mmap_switched:
 	str	r2, [r6]			@ Save atags pointer
 	cmp	r7, #0
 	strne	r0, [r7]			@ Save control register values
+	ct07_stamp_va 0xA6, r10, r11, r12	@ CT07: about to enter start_kernel
 	b	start_kernel
 ENDPROC(__mmap_switched)
 

@@ -516,6 +516,40 @@ static noinline __noreturn void __init ct07_early_pc_marker_spin(void)
 }
 #endif
 
+#ifdef CONFIG_CT07_BRINGUP
+/*
+ * CT07 early stage stamps, the C continuation of the ct07_stamp splatter in
+ * arch/arm/kernel/head.S: 128 words of 0xSSSSSSSS over the MediaTek ram
+ * console ring at PA 0x43F00000 + 0x200, read back after the death through
+ * /proc/aed/reboot-reason. No driver, no printk, no console needed.
+ *
+ * VA 0xC3F00000 is valid at every call site: before paging_init() through
+ * the strongly-ordered section __create_page_tables adds, after it through
+ * the write-back lowmem map (the ram_console reserved-memory node has no
+ * "no-map", so the frame stays in memblock.memory and map_lowmem() covers it).
+ * On the write-back map the stores would sit in L1/L2 until the watchdog
+ * dropped them, so each line is cleaned to the point of coherency by MVA
+ * (DCCIMVAC; a no-op on the strongly-ordered alias). Cortex-A53 lines are
+ * 64 bytes, 32 is used so any v7 line size is covered.
+ */
+#define CT07_RC_STAMP_VA	(0xC3F00000UL + 0x200)
+static void __init ct07_stage_early(u8 step)
+{
+	volatile u32 *p = (volatile u32 *)CT07_RC_STAMP_VA;
+	u32 v = step * 0x01010101U;
+	unsigned long a;
+	int i;
+
+	for (i = 0; i < 128; i++)
+		p[i] = v;
+	for (a = CT07_RC_STAMP_VA; a < CT07_RC_STAMP_VA + 512; a += 32)
+		asm volatile("mcr p15, 0, %0, c7, c14, 1" : : "r" (a) : "memory");
+	asm volatile("dsb sy" : : : "memory");
+}
+#else
+static inline void ct07_stage_early(u8 step) { }
+#endif
+
 asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
@@ -530,6 +564,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * lockdep hash:
 	 */
 	lockdep_init();
+	ct07_stage_early(0xA7);	/* CT07: start_kernel entered (stack, init_task ok) */
 	set_task_stack_end_magic(&init_task);
 	smp_setup_processor_id();
 	debug_objects_early_init();
@@ -552,6 +587,7 @@ asmlinkage __visible void __init start_kernel(void)
 	page_address_init();
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
+	ct07_stage_early(0xA8);	/* CT07: setup_arch done (DTB, machine, paging_init) */
 	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
@@ -583,6 +619,7 @@ asmlinkage __visible void __init start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_init();
+	ct07_stage_early(0xA9);	/* CT07: mm_init done */
 
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
@@ -605,6 +642,7 @@ asmlinkage __visible void __init start_kernel(void)
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
 	init_IRQ();
+	ct07_stage_early(0xAA);	/* CT07: init_IRQ done (GIC) */
 	tick_init();
 	rcu_init_nohz();
 	init_timers();
@@ -612,6 +650,7 @@ asmlinkage __visible void __init start_kernel(void)
 	softirq_init();
 	timekeeping_init();
 	time_init();
+	ct07_stage_early(0xAB);	/* CT07: time_init done (MTK GPT/arch timer) */
 	sched_clock_postinit();
 	perf_event_init();
 	profile_init();
@@ -627,6 +666,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * we've done PCI setups etc, and console_init() must be aware of
 	 * this. But we do want output early, in case something goes wrong.
 	 */
+	ct07_stage_early(0xAC);	/* CT07: about to console_init (0xC0 follows via ram_console) */
 	console_init();
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,

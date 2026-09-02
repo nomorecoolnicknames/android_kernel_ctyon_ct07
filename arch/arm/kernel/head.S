@@ -20,6 +20,61 @@
 #include <asm/ptrace.h>
 #include <asm/asm-offsets.h>
 #include <asm/memory.h>
+
+#ifdef CONFIG_CT07_BRINGUP
+/*
+ * CT07 pre-MMU boot stamp.
+ *
+ * Our source kernel dies before console_init, so no console, no pstore and no
+ * AEE callback ever exist to say how far it got (2026-09-02: WDT status 5,
+ * fiq step 0, LAST PC parked in ATF, cores 1-3 dead). The only channel that
+ * demonstrably survives that death and is readable afterwards from stock TWRP
+ * is the MediaTek ram console ring in DRAM at 0x43F00000: the next kernel
+ * copies it before reuse and prints its "last_reboot_reason" through
+ * /proc/aed/reboot-reason, where we already read a preserved record.
+ *
+ * So stamp fiq_step directly in physical DRAM, with the MMU still off and
+ * without any driver. Layout (drivers/misc/mediatek/ram_console/mtk_ram_console.c):
+ *   ring+0x00  sig       must be REBOOT_REASON_SIG 0x43474244
+ *   ring+0x2c  off_linux offset of struct last_reboot_reason
+ *   ring+off_linux+0x00  fiq_step   <- what /proc/aed/reboot-reason prints
+ * The write is skipped unless the signature is already there (LK sets it), so
+ * The store is done twice: unconditionally at the default off_linux of 512,
+ * and again at whatever off_linux the header advertises when the signature
+ * is present. The first attempt (guarded only) produced fiq step 0, which
+ * could equally mean "the guard rejected" or "the kernel never ran".
+ *
+ * Values are 0xA0 | stage so they cannot be confused with the driver's own
+ * fiq steps (1..41 seen live).
+ */
+#define CT07_RAM_CONSOLE_PA	0x43F00000
+#define CT07_RC_SIG		0x43474244
+#define CT07_RC_OFF_LINUX	0x2c
+
+	.macro	ct07_stamp, stage, ra, rb, rc
+	@ Splatter 0xSSSSSSSS over ring+0x200 .. ring+0x400. struct
+	@ last_reboot_reason starts at off_linux (512 by default) and
+	@ /proc/aed/reboot-reason prints many of its words (fiq_step, exp_type,
+	@ mcdi_*, deepidle, sodi*, spm_suspend, clk_data[8], vcore_dvfs_*), so
+	@ whatever the real offset is, several printed fields must change if a
+	@ single instruction of this kernel ever executes. Two earlier attempts
+	@ wrote one word at one offset and read back 0, which could not tell
+	@ "never ran" from "wrong offset".
+	ldr	\ra, =CT07_RAM_CONSOLE_PA
+	add	\ra, \ra, #0x200
+	mov	\rc, #\stage
+	orr	\rc, \rc, \rc, lsl #8
+	orr	\rc, \rc, \rc, lsl #16
+	mov	\rb, #128
+9002:	str	\rc, [\ra], #4
+	subs	\rb, \rb, #1
+	bne	9002b
+	dsb
+	.endm
+#else
+	.macro	ct07_stamp, stage, ra, rb, rc
+	.endm
+#endif
 #include <asm/thread_info.h>
 #include <asm/pgtable.h>
 
@@ -78,6 +133,7 @@
 
 	__HEAD
 ENTRY(stext)
+	ct07_stamp 0xA3, r3, r4, r5	@ CT07: real kernel entered, MMU off
  ARM_BE8(setend	be )			@ ensure we are in BE8 mode
 
  THUMB(	adr	r9, BSYM(1f)	)	@ Kernel is always entered in ARM.
@@ -93,6 +149,7 @@ ENTRY(stext)
 
 	mrc	p15, 0, r9, c0, c0		@ get processor id
 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
+	ct07_stamp 0xB1, r3, r6, r7	@ CT07: processor type looked up
 	movs	r10, r5				@ invalid processor (r5=0)?
  THUMB( it	eq )		@ force fixup-able long branch encoding
 	beq	__error_p			@ yes, error 'p'
@@ -119,6 +176,7 @@ ENTRY(stext)
 	 * r8 = phys_offset, r9 = cpuid, r10 = procinfo
 	 */
 	bl	__vet_atags
+	ct07_stamp 0xB2, r3, r6, r7	@ CT07: atags/dtb vetted
 #ifdef CONFIG_SMP_ON_UP
 	bl	__fixup_smp
 #endif
@@ -126,6 +184,7 @@ ENTRY(stext)
 	bl	__fixup_pv_table
 #endif
 	bl	__create_page_tables
+	ct07_stamp 0xB3, r3, r6, r7	@ CT07: initial page tables built (r4=pgd kept)
 
 	/*
 	 * The following calls CPU specific code in a position independent
@@ -141,7 +200,8 @@ ENTRY(stext)
  ARM(	add	pc, r10, #PROCINFO_INITFUNC	)
  THUMB(	add	r12, r10, #PROCINFO_INITFUNC	)
  THUMB(	ret	r12				)
-1:	b	__enable_mmu
+1:	ct07_stamp 0xB4, r3, r6, r7	@ CT07: proc init returned, about to enable the MMU
+	b	__enable_mmu
 ENDPROC(stext)
 	.ltorg
 #ifndef CONFIG_XIP_KERNEL
@@ -330,6 +390,32 @@ __create_page_tables:
 	add	r0, r4, #0xd8000000 >> (SECTION_SHIFT - PMD_ORDER)
 	str	r3, [r0]
 #endif
+#endif
+#ifdef CONFIG_CT07_BRINGUP
+	/*
+	 * CT07 diagnostics: map the MediaTek ram-console frame so the boot
+	 * stamps keep working once the MMU is on. __create_page_tables
+	 * otherwise maps only the kernel image and the identity page, and the
+	 * linear map does not exist until paging_init(), so a store to
+	 * 0xC3F00000 from __mmap_switched would fault and be indistinguishable
+	 * from "the kernel never got there" (that ambiguity cost a cycle).
+	 * One 1 MiB section, PA 0x43F00000 -> VA 0xC3F00000.
+	 *
+	 * It must be strongly-ordered (io_mmuflags: TEX=0 C=0 B=0 -> PRRR
+	 * index 0), not mm_mmuflags: the kernel sections are write-back
+	 * write-allocate (0x11c0e = TEX1|C|B|S), so a stamp written through
+	 * them sits in L1/L2 until something evicts it, and a watchdog reset
+	 * drops the caches. That is why bringup-map-20260902 never showed
+	 * 0xA4 even though it mapped the frame. XN as for the DEBUG_LL map.
+	 * paging_init() overwrites this entry with the normal lowmem map.
+	 */
+	ldr	r7, [r10, #PROCINFO_IO_MMUFLAGS]
+	ldr	r3, =0x43F00000
+	orr	r3, r3, r7
+	orr	r3, r3, #PMD_SECT_XN
+	ldr	r6, =0xC3F00000
+	mov	r6, r6, lsr #SECTION_SHIFT
+	str	r3, [r4, r6, lsl #PMD_ORDER]
 #endif
 #ifdef CONFIG_ARM_LPAE
 	sub	r4, r4, #0x1000		@ point to the PGD table
