@@ -271,45 +271,16 @@ void last_kmsg_store_to_emmc(void)
 #endif
 #endif
 
-#ifdef CONFIG_PSTORE
-void sram_log_save(const char *msg, int count)
-{
-	pstore_bconsole_write(NULL, msg, count);
-}
-
-void pstore_console_show(enum pstore_type_id type_id, struct seq_file *m, void *v)
-{
-	struct pstore_info *psi = psinfo;
-	char *buf = NULL;
-	ssize_t size;
-	u64 id;
-	int count;
-	enum pstore_type_id type;
-	struct timespec time;
-	bool compressed;
-
-	if (!psi)
-		return;
-	mutex_lock(&psi->read_mutex);
-	if (psi->open && psi->open(psi))
-		goto out;
-
-	while ((size = psi->read(&id, &type, &count, &time, &buf, &compressed, psi)) > 0) {
-		/*pr_err("ram_console: id %lld, type %d, count %d, size %zx\n", id, type, count,
-		       size);*/
-		if (type == type_id)
-			seq_write(m, buf, size);
-		kfree(buf);
-		buf = NULL;
-	}
-
-	if (psi->close)
-		psi->close(psi);
-out:
-	mutex_unlock(&psi->read_mutex);
-}
-#else
-void sram_log_save(const char *msg, int count)
+/*
+ * The DRAM ring writer. The vendor tree compiled it only #ifndef CONFIG_PSTORE
+ * and, with PSTORE=y, made sram_log_save() a pure forward to
+ * pstore_bconsole_write(), which is a silent no-op until ramoops registers
+ * at postcore_initcall (fs/pstore/platform.c: "if (psinfo)"). A kernel that
+ * dies before that left a valid DBGC header and an empty ring (m5c P9/P10,
+ * kernel-m5c-4.9-lc 0c9418f99 + f1d4d19d9; CT07 2026-09-02 analysis). The
+ * writer is now compiled unconditionally and used by both variants.
+ */
+static void ram_console_dram_save(const char *msg, int count)
 {
 	struct ram_console_buffer *buffer;
 	char *rc_console;
@@ -349,6 +320,50 @@ void sram_log_save(const char *msg, int count)
 	}
 
 }
+
+#ifdef CONFIG_PSTORE
+void sram_log_save(const char *msg, int count)
+{
+	ram_console_dram_save(msg, count);
+	pstore_bconsole_write(NULL, msg, count);
+}
+
+void pstore_console_show(enum pstore_type_id type_id, struct seq_file *m, void *v)
+{
+	struct pstore_info *psi = psinfo;
+	char *buf = NULL;
+	ssize_t size;
+	u64 id;
+	int count;
+	enum pstore_type_id type;
+	struct timespec time;
+	bool compressed;
+
+	if (!psi)
+		return;
+	mutex_lock(&psi->read_mutex);
+	if (psi->open && psi->open(psi))
+		goto out;
+
+	while ((size = psi->read(&id, &type, &count, &time, &buf, &compressed, psi)) > 0) {
+		/*pr_err("ram_console: id %lld, type %d, count %d, size %zx\n", id, type, count,
+		       size);*/
+		if (type == type_id)
+			seq_write(m, buf, size);
+		kfree(buf);
+		buf = NULL;
+	}
+
+	if (psi->close)
+		psi->close(psi);
+out:
+	mutex_unlock(&psi->read_mutex);
+}
+#else
+void sram_log_save(const char *msg, int count)
+{
+	ram_console_dram_save(msg, count);
+}
 #endif
 
 #ifdef __aarch64__
@@ -379,9 +394,8 @@ void aee_sram_fiq_log(const char *msg)
 {
 	unsigned int count = strlen(msg);
 	int delay = 100;
-	unsigned int ram_console_buffer_size = ram_console_size();
 
-	if (FIQ_log_size + count > ram_console_buffer_size)
+	if (ram_console_buffer == NULL || FIQ_log_size + count > ram_console_size())
 		return;
 
 	atomic_set(&rc_in_fiq, 1);
@@ -409,9 +423,31 @@ void ram_console_write(struct console *console, const char *s, unsigned int coun
 	spin_unlock_irqrestore(&ram_console_lock, flags);
 }
 
+/*
+ * Console path (every printk line). Ring only: with CONFIG_PSTORE the printk
+ * text already reaches the pstore console zone through pstore's own console,
+ * and forwarding it again through pstore_bconsole_write() would fill the
+ * bconsole zone with a second copy that ramoops_pstore_read() reports as
+ * another PSTORE_TYPE_CONSOLE record (/proc/last_kmsg twice). The exported
+ * ram_console_write() above keeps its stock behaviour for aee_sram_printk().
+ */
+static void ram_console_con_write(struct console *console, const char *s, unsigned int count)
+{
+	unsigned long flags;
+
+	if (atomic_read(&rc_in_fiq))
+		return;
+
+	spin_lock_irqsave(&ram_console_lock, flags);
+
+	ram_console_dram_save(s, count);
+
+	spin_unlock_irqrestore(&ram_console_lock, flags);
+}
+
 static struct console ram_console = {
 	.name = "ram",
-	.write = ram_console_write,
+	.write = ram_console_con_write,
 	.flags = CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME,
 	.index = -1,
 };
@@ -441,6 +477,22 @@ static int ram_console_check_header(struct ram_console_buffer *buffer)
 		return 0;
 }
 
+static int ram_console_ring_valid(struct ram_console_buffer *buffer)
+{
+	return buffer->off_console != 0
+	    && buffer->off_linux + ALIGN(sizeof(struct last_reboot_reason),
+					 64) == buffer->off_console
+	    && buffer->sz_console == buffer->sz_buffer - buffer->off_console
+	    && buffer->log_size <= buffer->sz_console && buffer->log_start <= buffer->sz_console;
+}
+
+static void ram_console_ring_show(struct ram_console_buffer *buffer, struct seq_file *m)
+{
+	seq_write(m, (void *)buffer + buffer->off_console + buffer->log_start,
+		  buffer->log_size - buffer->log_start);
+	seq_write(m, (void *)buffer + buffer->off_console, buffer->log_start);
+}
+
 static int ram_console_lastk_show(struct ram_console_buffer *buffer, struct seq_file *m, void *v)
 {
 	unsigned int wdt_status;
@@ -467,15 +519,17 @@ static int ram_console_lastk_show(struct ram_console_buffer *buffer, struct seq_
 	/*pr_err("ram_console: pstore show start\n");*/
 	pstore_console_show(PSTORE_TYPE_CONSOLE, m, v);
 	/*pr_err("ram_console: pstore show end\n");*/
+	/* The DRAM ring now records from console_init on; it is the only text
+	 * left by a kernel that died before ramoops probed. Append it. */
+	seq_printf(m, "\n--- ram console ring (previous boot, log_size %u) ---\n",
+		   buffer->log_size);
+	if (ram_console_ring_valid(buffer))
+		ram_console_ring_show(buffer, m);
+	else
+		seq_puts(m, "ring header invalid\n");
 #else
-	if (buffer->off_console != 0
-	    && buffer->off_linux + ALIGN(sizeof(struct last_reboot_reason),
-					 64) == buffer->off_console
-	    && buffer->sz_console == buffer->sz_buffer - buffer->off_console
-	    && buffer->log_size <= buffer->sz_console && buffer->log_start <= buffer->sz_console) {
-		seq_write(m, (void *)buffer + buffer->off_console + buffer->log_start,
-			  buffer->log_size - buffer->log_start);
-		seq_write(m, (void *)buffer + buffer->off_console, buffer->log_start);
+	if (ram_console_ring_valid(buffer)) {
+		ram_console_ring_show(buffer, m);
 	} else {
 		seq_puts(m, "header may be corrupted, dump the raw buffer for reference only\n");
 		seq_write(m, buffer, ram_console_buffer->sz_buffer);
@@ -514,9 +568,12 @@ static int __init ram_console_init(struct ram_console_buffer *buffer, size_t buf
 	buffer->log_start = 0;
 	buffer->log_size = 0;
 	memset_io((void *)buffer + buffer->off_linux, 0, buffer_size - buffer->off_linux);
-#ifndef CONFIG_PSTORE
+	/*
+	 * Register the ram console even with CONFIG_PSTORE (m5c 0c9418f99):
+	 * CON_PRINTBUFFER replays everything printed so far into the DRAM
+	 * ring, and pstore's own console coexists with it from postcore on.
+	 */
 	register_console(&ram_console);
-#endif
 	ram_console_init_done = 1;
 	return 0;
 }
