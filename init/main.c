@@ -720,6 +720,35 @@ core_param(initcall_debug, initcall_debug, bool, 0644);
 #ifdef CONFIG_CT07_BRINGUP
 
 extern int ipanic_write_size(void *buf, int off, int len);
+#ifdef CONFIG_MTK_RAM_CONSOLE
+extern void aee_rr_rec_fiq_step(u8 i);
+#else
+static inline void aee_rr_rec_fiq_step(u8 i) { }
+#endif
+
+/*
+ * Boot-stage stamps in the ram console header's fiq_step (u8). The preloader
+ * keeps the value across a watchdog reset once DDR-reserve is on
+ * (mtk_wdt.c ct07_rgu_ddr_reserve), the stock recovery kernel prints it as
+ * "ram console header, hw_status: N, fiq step <decimal>." at the top of
+ * /proc/last_kmsg and LK prints it into expdb ("fiq_step 0x.."), so the last
+ * stage reached is readable without /dev/mem. Values start at 0xC0 to stay
+ * clear of the AEE steps (4..64, mt-plat/mtk_ram_console.h); AEE's own WDT
+ * IRQ/FIQ handlers overwrite it, which is itself information.
+ */
+/* 0xC0 "console_init" is stamped from mtk_wdt.c ct07_rgu_ddr_reserve_console_init */
+#define CT07_STAGE_KERNEL_INIT	0xC1	/* kernel_init_freeable entered */
+#define CT07_STAGE_PRE_SMP	0xC2	/* before do_pre_smp_initcalls */
+#define CT07_STAGE_SMP_DONE	0xC3	/* smp_init + sched_init_smp done */
+#define CT07_STAGE_LEVEL(l)	(0xD0 + (l))	/* 0xD0 early .. 0xD7 late */
+#define CT07_STAGE_INIT_EXEC	0xE0	/* about to exec /init */
+
+static void ct07_stage(u8 step, const char *what)
+{
+	aee_rr_rec_fiq_step(step);
+	pr_notice("[CT07_STAGE] 0x%02x %s sched=%llu\n", step, what,
+		  (unsigned long long)sched_clock());
+}
 
 #define CT07_EXPDB_MARK_OFF 0x9f0000
 #define CT07_EXPDB_MARK_LEN 512
@@ -882,6 +911,16 @@ static inline void ct07_expdb_mark(const char *phase, initcall_t fn,
 				   int ret, unsigned long long ns)
 {
 }
+
+static inline void ct07_stage(u8 step, const char *what)
+{
+}
+
+#define CT07_STAGE_KERNEL_INIT	0
+#define CT07_STAGE_PRE_SMP	0
+#define CT07_STAGE_SMP_DONE	0
+#define CT07_STAGE_LEVEL(l)	0
+#define CT07_STAGE_INIT_EXEC	0
 
 #endif /* CONFIG_CT07_BRINGUP */
 
@@ -1050,6 +1089,7 @@ static void __init do_initcall_level(int level)
 {
 	initcall_t *fn;
 
+	ct07_stage(CT07_STAGE_LEVEL(level), initcall_level_names[level]);
 	strcpy(initcall_command_line, saved_command_line);
 	parse_args(initcall_level_names[level],
 		   initcall_command_line, __start___param,
@@ -1145,6 +1185,7 @@ static int __ref kernel_init(void *unused)
 	numa_default_policy();
 
 	flush_delayed_fput();
+	ct07_stage(CT07_STAGE_INIT_EXEC, "exec init");
 
 #ifdef CONFIG_MTPROF
 	log_boot("Kernel_init_done");
@@ -1187,6 +1228,7 @@ static noinline void __init kernel_init_freeable(void)
 	 * Wait until kthreadd is all set-up.
 	 */
 	wait_for_completion(&kthreadd_done);
+	ct07_stage(CT07_STAGE_KERNEL_INIT, "kernel_init");
 	ct07_wdt_diag_start();
 
 	/* Now the scheduler is fully set up and can do blocking allocations */
@@ -1205,11 +1247,13 @@ static noinline void __init kernel_init_freeable(void)
 
 	smp_prepare_cpus(setup_max_cpus);
 
+	ct07_stage(CT07_STAGE_PRE_SMP, "pre_smp");
 	do_pre_smp_initcalls();
 	lockup_detector_init();
 
 	smp_init();
 	sched_init_smp();
+	ct07_stage(CT07_STAGE_SMP_DONE, "smp_done");
 
 	do_basic_setup();
 

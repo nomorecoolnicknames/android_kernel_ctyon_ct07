@@ -836,6 +836,70 @@ static int __init mtk_wdt_init(void)
 static void __exit mtk_wdt_exit(void)
 {
 }
+#ifdef CONFIG_CT07_BRINGUP
+/*
+ * CT07 R1 (2026-09-02): keep DRAM in self-refresh across a watchdog reset so
+ * the ram console ring at 0x43F00000 and the pstore zones at 0x43F10000
+ * survive into the next boot (m5c p43, kernel-m5c-4.9-lc 90620e0e4, proven
+ * by 303562a05). Until now DDR-reserve was only reachable through
+ * wd_api->wd_dram_reserved_mode() from the full-MRDUMP path, which is off.
+ *
+ * MODE register read-modify-write ONLY, never a LENGTH write: m681
+ * HANDOFF_v44 s0.4 killed a boot by arming LENGTH+MODE from start_kernel.
+ * Every later writer of MTK_WDT_MODE in this file (mtk_wdt_mode_config,
+ * mtk_wdt_enable, wdt_arch_reset) is itself a RMW that leaves bit 7
+ * (MTK_WDT_MODE_DDR_RESERVE) alone, so the bit set here survives the
+ * postcore probe and the software-reboot path.
+ *
+ * Runs as early as the RGU can be mapped: a console_initcall (i.e. inside
+ * start_kernel->console_init, next to ram_console_early_init; the DT is
+ * unflattened and ioremap works there) and again from the core_initcall
+ * below, in case the first mapping failed.
+ */
+static int __init ct07_rgu_ddr_reserve(const char *where)
+{
+	unsigned int mode;
+
+#ifdef CONFIG_OF
+	if (!toprgu_base) {
+		struct device_node *np_rgu;
+
+		np_rgu = of_find_compatible_node(NULL, NULL,
+						 rgu_of_match[0].compatible);
+		if (np_rgu)
+			toprgu_base = of_iomap(np_rgu, 0);
+	}
+#endif
+	if (!toprgu_base) {
+		pr_err("[CT07_RGU] %s: RGU not mapped, DDR-reserve not set\n",
+		       where);
+		return -ENODEV;
+	}
+
+	mtk_rgu_dram_reserved(1);
+	mode = __raw_readl(MTK_WDT_MODE);
+	pr_notice("[CT07_RGU] %s: DDR-reserve %s, MTK_WDT_MODE=0x%08x\n", where,
+		  (mode & MTK_WDT_MODE_DDR_RESERVE) ? "on" : "NOT SET", mode);
+	return 0;
+}
+
+static int __init ct07_rgu_ddr_reserve_console_init(void)
+{
+	int ret = ct07_rgu_ddr_reserve("console_init");
+
+	/*
+	 * Stage 0xC0 "console_init" (table in init/main.c). ram_console_early_init
+	 * has already run (drivers/misc links before drivers/watchdog), so with
+	 * the stamps in init/main.c a "fiq step 0" at the next boot means "DRAM
+	 * did not survive or the kernel never reached console_init", no longer
+	 * "reached an unknown point".
+	 */
+	aee_rr_rec_fiq_step(0xC0);
+	return ret;
+}
+console_initcall(ct07_rgu_ddr_reserve_console_init);
+#endif /* CONFIG_CT07_BRINGUP */
+
 /*this function is for those user who need WDT APIs before WDT driver's probe*/
 static int __init mtk_wdt_get_base_addr(void)
 {
@@ -852,6 +916,9 @@ static int __init mtk_wdt_get_base_addr(void)
 		pr_debug("RGU base: 0x%p\n", toprgu_base);
 	}
 
+#endif
+#ifdef CONFIG_CT07_BRINGUP
+	ct07_rgu_ddr_reserve("core_initcall");
 #endif
 	return 0;
 }
