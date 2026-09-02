@@ -560,3 +560,56 @@ padded-16m `98a0b8fb27131d98bf76132532a54eb832b3fc9d79f40a4150095258edbd8c4d`. N
 - **Verification:** `grep -c 'ct07_rgu_ddr_reserve\|ct07_stage' System.map`;
   on the phone `head -1 /proc/last_kmsg; cat /proc/aed/reboot-reason`;
   `strings -n 6 /tmp/expdb.bin | grep 'fiq_step\|ct07@forge\|CT07_RGU\|CT07_STAGE' | tail -20`.
+
+### 2026-09-02 — 371e7f62: boot stamps must not clobber r1/r2/r0 and must bypass the cache
+
+Build `bringup-mmufix-20260902` (ct07_bringup_defconfig, tree = ec0129f2 +
+the diff of 371e7f62, `source.patch` sha256 `3e896986…` == `git diff ec0129f2 371e7f62`):
+`zImage-dtb` `64a9589f4692585b25cef3385b97175ff65da3ed43cca1327bd81d5cf067367f`; image
+`out/ct07-flash-kit-20260902/boot/boot-rom-mmufix.img`
+`8f61655df1ef3b45f8d578737d9d9c6433fd195b185bceead31c512cf2baf6d9`
+(ROM ramdisk `rom2-unpacked/ramdisk` byte-identical, 91-byte cmdline as
+`recfs100s.json`). Not flashed. Full analysis:
+`docs/run_reports/ct07_mmu_turnon_analysis.md` (ctyon repo).
+
+- **Category:** DIAGNOSTIC (`CONFIG_CT07_BRINGUP` only; ct07_defconfig off).
+- **Hypothesis:** "the kernel dies in `__enable_mmu`/`__turn_mmu_on`"
+  (BRINGUP_STATE 18:50) is an artefact of the stamps. (1) the decompressor's
+  `0xA2` stamp at `__enter_kernel` used r0,r1,r2 *after* `mov r1,r7 / mov r2,r8`
+  restored the architecture ID and DTB pointer, so every instrumented build
+  entered the kernel with r1 = 0, r2 = 0xA2A2A2A2; `__vet_atags` zeroed r2 and
+  `setup_arch()` ended in `setup_machine_tags()` → `dump_machine_table()` →
+  `while(1)` → WDT. (2) `0xA4/0xA5/0xA6` used r0,r1,r2 that `__mmap_switched`
+  still stores (`cr_alignment`, `__machine_arch_type`, `__atags_pointer`).
+  (3) the ram-console section in bringup-map used `mm_mmuflags` (0x11c0e,
+  write-back), so post-MMU stamps stayed in L1/L2 and the reset dropped them.
+  The MMU path itself is instruction-identical to the stock kernel.
+- **Evidence:** `bringup-map-20260902/zImage-dtb` +0x9c0..+0x9ec
+  (`e3a020a2 … e3a01080 … e2511001 … e3a00000 e1a0f004`); `vmlinux`
+  c0bf92e0..c0bf939c (`str r1,[r5]` / `str r2,[r6]` / `strne r0,[r7]` after
+  the stamps), c00081f0 `ldr r7,[sl,#8]`; proc_info c08c17a0 (mm 0x11c0e,
+  io 0xc02); System.map `swapper_pg_dir c0004000`, `__turn_mmu_on c08c0e10`
+  (identity entry pgd[0x408] = 0x40811c0e), `_end c0e922a4`, empty
+  `__pv_table`; stock kernel (`boot-stock.bin`, Image sha256 `1c876058…`)
+  `__enable_mmu` c00086a4 / `__turn_mmu_on` c09778e0 / TTB setup c001f3e4
+  identical.
+- **Files:** `arch/arm/boot/compressed/head.S` (`0xA2` → r0,r7,r8),
+  `arch/arm/kernel/head-common.S` (`0xA4-0xA6` → r10,r11,r12),
+  `arch/arm/kernel/head.S` (frame entry `PROCINFO_IO_MMUFLAGS | PMD_SECT_XN`
+  = 0x43f00c12, strongly-ordered), `init/main.c` (`ct07_stage_early()`:
+  splatter + DCCIMVAC + dsb; stamps 0xA7 start_kernel, 0xA8 setup_arch,
+  0xA9 mm_init, 0xAA init_IRQ, 0xAB time_init, 0xAC before console_init).
+- **Why:** (1)/(2) restore the boot-protocol registers; head.S makes the
+  post-MMU writes uncacheable so a WDT reset cannot lose them; main.c
+  extends the channel to console_init so the real death is localised.
+- **Expected next marker:** `/proc/aed/reboot-reason` splattered fields ≥
+  `0xa4a4a4a4`; `0xa7..0xac` = start_kernel progress; `0xac` + `fiq step ≥ 192`
+  = console_init reached. `0xb4b4b4b4` again = MMU turn-on truly fails.
+- **Rollback:** `0xb4b4b4b4` with the p7 hash verified — keep the register
+  fix (it is correct regardless), drop the post-MMU stamps and probe the
+  handoff state (SCTLR/HCR/SCR) instead of the page tables.
+- **Verification:**
+  `sha256sum out/kernel-builds/bringup-mmufix-20260902/zImage-dtb` → `64a9589f…`;
+  `flash.sh <serial> boot/boot-rom-mmufix.img 7`; loop once; hold `8`;
+  `adb shell cat /proc/aed/reboot-reason > aed_reboot_reason.txt`;
+  `grep -o '0x[a-f0-9]\{8\}' aed_reboot_reason.txt | sort | uniq -c | sort -rn | head`.
