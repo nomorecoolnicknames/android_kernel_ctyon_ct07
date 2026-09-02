@@ -11,6 +11,61 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 
+#ifdef CONFIG_CT07_BRINGUP
+/*
+ * CT07 pre-MMU boot stamp.
+ *
+ * Our source kernel dies before console_init, so no console, no pstore and no
+ * AEE callback ever exist to say how far it got (2026-09-02: WDT status 5,
+ * fiq step 0, LAST PC parked in ATF, cores 1-3 dead). The only channel that
+ * demonstrably survives that death and is readable afterwards from stock TWRP
+ * is the MediaTek ram console ring in DRAM at 0x43F00000: the next kernel
+ * copies it before reuse and prints its "last_reboot_reason" through
+ * /proc/aed/reboot-reason, where we already read a preserved record.
+ *
+ * So stamp fiq_step directly in physical DRAM, with the MMU still off and
+ * without any driver. Layout (drivers/misc/mediatek/ram_console/mtk_ram_console.c):
+ *   ring+0x00  sig       must be REBOOT_REASON_SIG 0x43474244
+ *   ring+0x2c  off_linux offset of struct last_reboot_reason
+ *   ring+off_linux+0x00  fiq_step   <- what /proc/aed/reboot-reason prints
+ * The write is skipped unless the signature is already there (LK sets it), so
+ * The store is done twice: unconditionally at the default off_linux of 512,
+ * and again at whatever off_linux the header advertises when the signature
+ * is present. The first attempt (guarded only) produced fiq step 0, which
+ * could equally mean "the guard rejected" or "the kernel never ran".
+ *
+ * Values are 0xA0 | stage so they cannot be confused with the driver's own
+ * fiq steps (1..41 seen live).
+ */
+#define CT07_RAM_CONSOLE_PA	0x43F00000
+#define CT07_RC_SIG		0x43474244
+#define CT07_RC_OFF_LINUX	0x2c
+
+	.macro	ct07_stamp, stage, ra, rb, rc
+	@ Splatter 0xSSSSSSSS over ring+0x200 .. ring+0x400. struct
+	@ last_reboot_reason starts at off_linux (512 by default) and
+	@ /proc/aed/reboot-reason prints many of its words (fiq_step, exp_type,
+	@ mcdi_*, deepidle, sodi*, spm_suspend, clk_data[8], vcore_dvfs_*), so
+	@ whatever the real offset is, several printed fields must change if a
+	@ single instruction of this kernel ever executes. Two earlier attempts
+	@ wrote one word at one offset and read back 0, which could not tell
+	@ "never ran" from "wrong offset".
+	ldr	\ra, =CT07_RAM_CONSOLE_PA
+	add	\ra, \ra, #0x200
+	mov	\rc, #\stage
+	orr	\rc, \rc, \rc, lsl #8
+	orr	\rc, \rc, \rc, lsl #16
+	mov	\rb, #128
+9002:	str	\rc, [\ra], #4
+	subs	\rb, \rb, #1
+	bne	9002b
+	dsb
+	.endm
+#else
+	.macro	ct07_stamp, stage, ra, rb, rc
+	.endm
+#endif
+
 	.arch	armv7-a
 /*
  * Debugging stuff
@@ -139,6 +194,8 @@ start:
 #endif
 		mov	r7, r1			@ save architecture ID
 		mov	r8, r2			@ save atags pointer
+		@ CT07: r1/r2 are already copied to r7/r8, so they are free here.
+		ct07_stamp 0xA1, r0, r1, r2	@ CT07: decompressor entered
 
 		/*
 		 * Booting from Angel - need to enter SVC mode and disable
@@ -1290,6 +1347,13 @@ __hyp_reentry_vectors:
 #endif /* CONFIG_ARM_VIRT_EXT */
 
 __enter_kernel:
+		@ CT07: r1 = architecture ID and r2 = DTB/atags pointer were just
+		@ restored from r7/r8 for the kernel and MUST survive this stamp.
+		@ Every build of 2026-09-02 up to bringup-map used r0,r1,r2 here and
+		@ handed the kernel r1 = 0, r2 = 0xA2A2A2A2: __vet_atags then
+		@ dropped the DTB (r2 = 0) and setup_arch() had no machine to boot.
+		@ r7/r8 are dead once copied back, r0 is zeroed below.
+		ct07_stamp 0xA2, r0, r7, r8	@ CT07: about to jump to the kernel
 		mov	r0, #0			@ must be 0
  ARM(		mov	pc, r4	)		@ call kernel
  THUMB(		bx	r4	)		@ entry point is always ARM
