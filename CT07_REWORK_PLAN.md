@@ -470,3 +470,93 @@ explicit ADB port.
 - **Rollback:** revert if the device still powers off at ~150 s and last_kmsg
   names another caller, or if charging/battery behaviour regresses vs stock.
 - **Verification:** `grep -n "Disable check battery exist\|Battery is not exist\|charging_set_power_off\|CT07_FAILSAFE" /proc/last_kmsg` in TWRP after the warm reboot.
+
+### 2026-09-02 — 4c870c51 + ccf4e3b3: DRAM ring live under PSTORE, RGU DDR-reserve, boot-stage stamps
+
+Build `bringup-dramres-20260902` (ct07_bringup_defconfig, HEAD ccf4e3b3):
+`zImage-dtb` `a059674e946c0c16230caeb86f2a5941167002baf79c83e86428889c8770168c`; image
+`out/ct07-flash-kit-20260902/boot/boot-rom-dramres-fs100.img` `015391204e050cd51ddcb3ce74cd7dd3a6164a6b746c0b0a1ecf5d8aa2c8b52a`
+(ROM ramdisk `rom2-unpacked/ramdisk` byte-identical, 91-byte cmdline
+`bootopt=64S3,32N2,32N2 androidboot.selinux=permissive ct07_reboot_after=100 ignore_loglevel`),
+padded-16m `98a0b8fb27131d98bf76132532a54eb832b3fc9d79f40a4150095258edbd8c4d`. Not flashed.
+
+#### 4c870c51 — ram_console: record printk text in the DRAM ring under CONFIG_PSTORE
+
+- **Category:** PROPER-FIX (both defconfigs).
+- **Hypothesis:** with `CONFIG_PSTORE=y` the ram console at 0x43F00000 is
+  never registered as a console and `sram_log_save()` only forwards to
+  `pstore_bconsole_write()`, a no-op until ramoops probes at
+  `postcore_initcall`; a kernel dying before that leaves a valid DBGC header
+  and an empty ring, and no other zone holds text.
+- **Evidence:** `mtk_ram_console.c:274-277`, `:517-518` (pre-patch);
+  `fs/pstore/platform.c:404-410` `if (psinfo)`; `fs/pstore/ram.c:686`;
+  `ct07_bringup_defconfig:440-447`, `:243-248`; every captured log is a
+  stock-kernel session (`docs/run_reports/ct07_kernel_log_channel_analysis.md`
+  A1-A4, B5); m5c `0c9418f99` + `f1d4d19d9`, P11 "103 lines in the ring"
+  (`docs/run_reports/m5c_kernel_bringup_lessons.md` F3, A3).
+- **Files:** `drivers/misc/mediatek/ram_console/mtk_ram_console.c` —
+  `ram_console_dram_save()` compiled unconditionally and used by both
+  `sram_log_save()` variants (PSTORE variant keeps the bconsole forward);
+  new `ram_console_con_write()` as the console `.write` (ring only, so the
+  pstore bconsole zone does not get a duplicate that `ramoops_pstore_read()`
+  would return as a second CONSOLE record); `register_console()`
+  unconditional (`CON_PRINTBUFFER` replays log_buf); NULL guard in
+  `aee_sram_fiq_log()`; `/proc/last_kmsg` under `PSTORE_CONSOLE` appends the
+  previous boot's ring after the pstore record.
+- **Expected next marker:** ring at 0x43F00000 holds
+  `Linux version 3.18.19+ (ct07@forge)` + boot log, header `log_size > 0`;
+  visible in expdb via LK kedump `SYS_RAMCONSOLE_RAW` after a WDT boot, or
+  via `/dev/mem` from a DEVMEM recovery, or in this kernel's own
+  `/proc/last_kmsg` ("--- ram console ring (previous boot, log_size N) ---").
+- **Rollback:** console-lock hang or duplicated text in `/proc/last_kmsg` on a
+  boot that provably reaches userspace; aee WDT/KE dumps missing from the
+  bconsole record.
+- **Verification:** `dd if=/dev/block/mmcblk0p10 of=/tmp/expdb.bin bs=1048576 count=10`;
+  `strings -n 8 /tmp/expdb.bin | grep -c 'ct07@forge\|CT07_STAGE\|CT07_RGU'`;
+  `head -1 /proc/last_kmsg`.
+
+#### ccf4e3b3 — ct07: RGU DDR-reserve from console_init + boot-stage stamps in fiq_step
+
+- **Category:** DIAGNOSTIC (`CONFIG_CT07_BRINGUP` only).
+- **Hypothesis:** the ~25 s HW WDT reset lets the preloader re-initialise
+  DRAM before the next kernel reads it; RGU DDR-reserve (MODE bit 7) keeps
+  DRAM in self-refresh across the reset, and a stage byte in the ram console
+  header's `fiq_step` is printed by LK (expdb) and by the stock TWRP kernel
+  (`/proc/last_kmsg` line 1) without `/dev/mem`. Whether the CT07 preloader
+  honours the bit is the HYPOTHESIS under test.
+- **Evidence:** `mtk_wdt.c:356-373` `mtk_rgu_dram_reserved()`, sole caller
+  `wd_api.c:270-282` on the MRDUMP path (`CONFIG_MTK_AEE_MRDUMP` not set);
+  `mt_wdt.h`: MODE +0x0, LENGTH +0x4, RESTART +0x8/key 0x1971,
+  `DDR_RESERVE 0x0080`, `KEY 0x22000000`; `vz6737t_35g_a_m0.dts:1647-1651`
+  `toprgu@10212000` reg `<0x10212000 0x1000>`; later MODE writers
+  (`mtk_wdt_mode_config` bits 0-4,6; `mtk_wdt_enable` bit 0;
+  `wdt_arch_reset` clears AUTO_RESTART|IRQ|ENABLE|DUAL) preserve bit 7;
+  `wd_api.c:33 .ready = 1` (wd_api kick valid from `kernel_init`, so no
+  direct-kick change needed); `mtk_ram_console.h:9-38` AEE steps 4..64;
+  m5c `90620e0e4` → `303562a05`; m681 HANDOFF_v44 §0.4 (LENGTH write from
+  start_kernel killed the boot; MODE RMW only).
+- **Files:** `drivers/watchdog/mediatek/wdt/mt6735/mtk_wdt.c` —
+  `ct07_rgu_ddr_reserve()` (lazy `of_iomap` of the RGU + `mtk_rgu_dram_reserved(1)`,
+  MODE RMW only, prints `[CT07_RGU] <where>: DDR-reserve on, MTK_WDT_MODE=0x…`),
+  as `console_initcall` (stamps fiq_step 0xC0) and re-asserted in
+  `core_initcall(mtk_wdt_get_base_addr)`; `init/main.c` — `ct07_stage()`
+  stamps 0xC1 kernel_init, 0xC2 pre-SMP, 0xC3 SMP done, 0xD0+level per
+  initcall level, 0xE0 before exec of `/init`, each with a `[CT07_STAGE]`
+  printk; no-op stubs when the option is off.
+- **Not done (R3a/R3b of the lessons report):** single-mode WDT (changes
+  crash semantics, irrelevant before the postcore probe) and direct
+  `mtk_wdt_restart()` kicks (wd_api already valid).
+- **Expected next marker:** stock TWRP after one loop iteration:
+  `ram console header, hw_status: 5, fiq step N.` with N ≠ 0 — 192 (0xC0)
+  died after console_init, 193-195 kernel_init/pre-SMP/SMP window,
+  208+L (0xD0+L) inside initcall level L (0 early … 7 late), 224 (0xE0)
+  reached exec of `/init`; same value in `/proc/aed/reboot-reason` and in
+  expdb `fiq_step 0x..`. N = 0 with this image verified in p7 ⇒ DRAM did not
+  survive (preloader ignores bit 7) or the kernel never reached
+  `console_init`.
+- **Rollback:** the boot dies earlier than before (fiq step 0, loop period
+  < 25 s) ⇒ drop the console_initcall placement; preloader hangs with DRAM
+  preserved (no LK, no TWRP on key 8) ⇒ drop DDR-reserve.
+- **Verification:** `grep -c 'ct07_rgu_ddr_reserve\|ct07_stage' System.map`;
+  on the phone `head -1 /proc/last_kmsg; cat /proc/aed/reboot-reason`;
+  `strings -n 6 /tmp/expdb.bin | grep 'fiq_step\|ct07@forge\|CT07_RGU\|CT07_STAGE' | tail -20`.
