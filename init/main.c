@@ -80,6 +80,7 @@
 #include <linux/list.h>
 #include <linux/suspend.h>
 #include <linux/reboot.h>
+#include <linux/workqueue.h>
 #include <linux/timer.h>
 
 #include <asm/io.h>
@@ -726,13 +727,20 @@ extern int ipanic_write_size(void *buf, int off, int len);
 
 static char ct07_expdb_mark_buf[CT07_EXPDB_MARK_LEN] __aligned(512);
 static unsigned int ct07_reboot_after;
+static unsigned int ct07_reboot_stage;
 static struct timer_list ct07_reboot_timer;
+static struct work_struct ct07_reboot_work;
 
+/*
+ * 30..1800 s. The lower bound used to be 600 s, which made the 2026-09-02
+ * "ct07_reboot_after=100" images silently unarmed: keep the range wide
+ * enough to fire before the ~150 s power-off under investigation.
+ */
 static int __init ct07_reboot_after_setup(char *str)
 {
 	unsigned int seconds;
 
-	if (!str || kstrtouint(str, 0, &seconds) || seconds < 600 ||
+	if (!str || kstrtouint(str, 0, &seconds) || seconds < 30 ||
 	    seconds > 1800)
 		return -EINVAL;
 
@@ -741,10 +749,33 @@ static int __init ct07_reboot_after_setup(char *str)
 }
 early_param("ct07_reboot_after", ct07_reboot_after_setup);
 
+/*
+ * Stage 1: an orderly kernel_restart("recovery"). It reaches arch_reset()
+ * through the MTK restart handler (wd_api.c), which calls
+ * rtc_mark_recovery(); LK honours that mark and boots the recovery
+ * partition (p8) — proven live on 2026-09-02 with "adb reboot recovery"
+ * from the stock kernel (last_kmsg: "arch_reset: cmd = recovery" →
+ * "mtk_rtc_common: rtc_mark_recovery" → TWRP up 25 s later). Landing in
+ * TWRP is what makes the ROM kernel's last_kmsg readable without a button.
+ * Stage 2, 30 s later, if the orderly path wedged: plain emergency_restart().
+ */
+static void ct07_reboot_work_fn(struct work_struct *work)
+{
+	pr_emerg("[CT07_FAILSAFE] kernel_restart(recovery) after %u seconds\n",
+		 ct07_reboot_after);
+	kernel_restart("recovery");
+}
+
 static void ct07_reboot_timer_fn(unsigned long unused)
 {
-	pr_emerg("[CT07_FAILSAFE] emergency warm reboot after %u seconds\n",
-		 ct07_reboot_after);
+	if (!ct07_reboot_stage++) {
+		pr_emerg("[CT07_FAILSAFE] stage 1: recovery restart after %u seconds\n",
+			 ct07_reboot_after);
+		schedule_work(&ct07_reboot_work);
+		mod_timer(&ct07_reboot_timer, jiffies + 30 * HZ);
+		return;
+	}
+	pr_emerg("[CT07_FAILSAFE] stage 2: emergency warm reboot\n");
 	emergency_restart();
 }
 
@@ -806,6 +837,7 @@ static void ct07_wdt_diag_start(void)
 	if (ct07_reboot_after) {
 		pr_notice("[CT07_FAILSAFE] armed for %u seconds\n",
 			  ct07_reboot_after);
+		INIT_WORK(&ct07_reboot_work, ct07_reboot_work_fn);
 		setup_timer(&ct07_reboot_timer, ct07_reboot_timer_fn, 0);
 		mod_timer(&ct07_reboot_timer,
 			  jiffies + ct07_reboot_after * HZ);
