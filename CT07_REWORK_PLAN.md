@@ -613,3 +613,41 @@ the diff of 371e7f62, `source.patch` sha256 `3e896986…` == `git diff ec0129f2 
   `flash.sh <serial> boot/boot-rom-mmufix.img 7`; loop once; hold `8`;
   `adb shell cat /proc/aed/reboot-reason > aed_reboot_reason.txt`;
   `grep -o '0x[a-f0-9]\{8\}' aed_reboot_reason.txt | sort | uniq -c | sort -rn | head`.
+
+### 2026-09-10 — durable `-fno-pic` in `arch/arm/Makefile`
+
+**Category:** PROPER-FIX (all profiles; the build script's `KCFLAGS` becomes
+belt-and-braces).
+
+- **Why:** `ct07_prestart_code_recon.md` ranked the `-fpic` injection of
+  `arm-linux-androideabi-4.9` (driver-spec `%{!fno-pic:...: -fpic}`) as the
+  primary root cause: orphan `.data.rel*` sections land inside
+  `[__bss_start, _end)`, `__mmap_switched` zeroes them, `start_kernel`'s first
+  store (`set_task_stack_end_magic(&init_task)`) faults. Until now only
+  `scripts/build_ct07_kernel.sh` carried `KCFLAGS=-fno-pic`, so any kernel
+  built outside the script (a plain `make`, another CI, an older manifest
+  replay) silently returned to the broken layout.
+- **Change:** `arch/arm/Makefile` gets `KBUILD_CFLAGS += -fno-pic` with the
+  full evidence comment. Last flag wins, and kbuild appends a directory's
+  `ccflags-y` after `KBUILD_CFLAGS` (`scripts/Makefile.lib:104`
+  `orig_c_flags = $(KBUILD_CFLAGS) $(KBUILD_SUBDIR_CCFLAGS) …`), so
+  `arch/arm/boot/compressed` keeps its deliberate `-fpic` (`ccflags-y :=
+  -fpic -mno-single-pic-base …`) and the decompressor still relocates its own
+  GOT. Verified on `bringup-mmufix-20260902` (built with script `KCFLAGS`
+  only): 0 `.data.rel*` sections, `init_task c0c91a10` / `init_mm c0c9d7e0` <
+  `__bss_start c0d57314`, 1 stray `add rN,pc,rN` opcode in 3 488 965 words of
+  the decompressed image (pre-fix builds: 116 488).
+- **Post-link assertion** (ctyon repo `scripts/build_ct07_kernel.sh`): after
+  the build, `readelf -SW vmlinux | grep -c 'data\.rel'` must be 0 and
+  `init_task`/`init_mm` must sort below `__bss_start`; otherwise the build
+  fails before the manifest is written. Positive control: the same check run
+  on `bringup-xperms-20260831/vmlinux` reports 4 sections and
+  `init_task c0df7670 ≥ __bss_start c0dc5944` — it would have been rejected.
+- **Also:** the script now accepts `CT07_CROSS` (e.g. `arm-eabi-` against the
+  June `arm-eabi-4.8` tree, recon finding 16) instead of hard-coding the
+  androideabi prefix, and the manifest records the real compiler version and
+  prefix instead of a hardcoded string. Default behaviour is unchanged.
+- **Expected next marker:** unchanged — the `bringup-mmufix-20260902` image
+  already contains both the safe stamps and the non-PIC codegen; a fresh
+  build from this commit is for the production profile (and for
+  reproducibility of the fix itself), not a new hypothesis.
