@@ -312,10 +312,9 @@ int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSenso
 		ISP_MCLK2_EN(1);
 		ISP_MCLK3_EN(1);
 #else
-		if (pinSetIdx == 0)
-			ISP_MCLK1_EN(1);
-		else if (pinSetIdx == 1)
-			ISP_MCLK2_EN(1);
+		/* CT07: stock kdCISModulePowerOn enables MCLK1 for every slot;
+		 * both SP0A09 modules are clocked from MCLK1. */
+		ISP_MCLK1_EN(1);
 #endif
 
 		PK_DBG("[PowerON]pinSetIdx:%d, currSensorName: %s\n", pinSetIdx, currSensorName);
@@ -475,7 +474,8 @@ int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSenso
 
 			mdelay(5);
 		} else if (currSensorName &&
-			(0 == strcmp(SENSOR_DRVNAME_SP0A09_MIPI_RAW, currSensorName))) {
+			((0 == strcmp(SENSOR_DRVNAME_SP0A09_MIPI_RAW, currSensorName)) ||
+			 (0 == strcmp(SENSOR_DRVNAME_SP0A09S_MIPI_RAW, currSensorName)))) {
 			/* CT07 stock sequence: SP0A09 uses IO + analog rails only. */
 			if (GPIO_CAMERA_INVALID != pinSet[pinSetIdx][IDX_PS_CMPDN])
 				mtkcam_gpio_set(pinSetIdx, CAMPDN,
@@ -577,10 +577,7 @@ int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSenso
 	} else { /* power OFF */
 
 		PK_DBG("[PowerOFF]pinSetIdx:%d\n", pinSetIdx);
-		if (pinSetIdx == 0)
-			ISP_MCLK1_EN(0);
-		else if (pinSetIdx == 1)
-			ISP_MCLK2_EN(0);
+		ISP_MCLK1_EN(0);
 
 		if ((currSensorName && (0 == strcmp(currSensorName, "imx135mipiraw"))) ||
 		    (currSensorName && (0 == strcmp(currSensorName, "imx220mipiraw"))))
@@ -693,7 +690,8 @@ int kdCISModulePowerOn(CAMERA_DUAL_CAMERA_SENSOR_ENUM SensorIdx, char *currSenso
 			}
 
 		} else if (currSensorName &&
-			(0 == strcmp(SENSOR_DRVNAME_SP0A09_MIPI_RAW, currSensorName))) {
+			((0 == strcmp(SENSOR_DRVNAME_SP0A09_MIPI_RAW, currSensorName)) ||
+			 (0 == strcmp(SENSOR_DRVNAME_SP0A09S_MIPI_RAW, currSensorName)))) {
 			if (GPIO_CAMERA_INVALID != pinSet[pinSetIdx][IDX_PS_CMPDN])
 				mtkcam_gpio_set(pinSetIdx, CAMPDN,
 					pinSet[pinSetIdx][IDX_PS_CMPDN + IDX_PS_OFF]);
