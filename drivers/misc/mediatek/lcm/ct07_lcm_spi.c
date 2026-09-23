@@ -50,8 +50,10 @@ static struct mt_chip_conf ct07_lcm_spi_conf = {
 	.rx_mlsb = SPI_MSB,
 	.tx_endian = SPI_LENDIAN,
 	.rx_endian = SPI_LENDIAN,
-	.com_mod = FIFO_TRANSFER,
-	.pause = PAUSE_MODE_DISABLE,
+	/* CT07: stock lcm_spi chip conf (c0dbe0b8): DMA + pause. FIFO mode
+	 * rejects anything over 32 bytes (spi.c:753), i.e. every frame. */
+	.com_mod = DMA_TRANSFER,
+	.pause = PAUSE_MODE_ENABLE,
 	.finish_intr = FINISH_INTR_EN,
 	.deassert = DEASSERT_DISABLE,
 	.ulthigh = ULTRA_HIGH_DISABLE,
@@ -219,6 +221,18 @@ int ct07_lcm_spi_send_data(const unsigned char *data, unsigned int len)
 	return ct07_lcm_spi_xfer(data, len, true);
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_data);
+
+/* Stock SpiSendData (c03c0588): RAMWR, the whole RGB565 frame, DISPON. */
+int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len)
+{
+	int ret = ct07_lcm_spi_send_cmd(0x2c);
+
+	if (!ret)
+		ret = ct07_lcm_spi_send_data(buf, len);
+	ct07_lcm_spi_send_cmd(0x29);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_frame);
 
 static int ct07_lcm_spi_probe(struct spi_device *spi)
 {

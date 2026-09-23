@@ -6318,6 +6318,13 @@ int primary_display_trigger(int blocking, void *callback, unsigned int userdata)
 
 	dprec_logger_done(DPREC_LOGGER_PRIMARY_TRIGGER, 0, 0);
 
+	/* CT07: the NV3029G is an SPI panel; the DDP output goes nowhere.
+	 * Stock wakes mtkfb's SPI pusher after each trigger (c0428e9c). */
+	if (primary_display_get_width() == 240) {
+		ct07_spicap_pending = 1;
+		wake_up(&ct07_spicap_wq);
+	}
+
 done:
 	_primary_path_unlock(__func__);
 	/* FIXME: find aee_kernel_Powerkey_is_press definitation */

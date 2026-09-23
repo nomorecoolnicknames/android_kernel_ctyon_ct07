@@ -61,6 +61,71 @@
 #endif
 #include "disp_helper.h"
 
+/*
+ * CT07: the panel (NV3029G, 240x320) hangs off SPI, not DSI. The stock
+ * kernel keeps the DDP path running and, after every primary trigger,
+ * a SCHED_FIFO thread captures the OVL output as RGB565 through WDMA,
+ * byte-swaps each pixel and pushes the frame over SPI (stock
+ * trigger_spiCap_thread / SpiSendData). Without it the panel keeps LK's
+ * logo forever (live 2026-09-23: screencap shows the UI, panel shows logo).
+ */
+int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len);
+int ct07_spicap_pending;
+DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
+static void *ct07_spicap_buf;	/* WDMA capture target */
+static void *ct07_spicap_tx;	/* byte-swapped copy handed to SPI DMA */
+
+static int ct07_spicap_thread(void *data)
+{
+	struct sched_param param = {.sched_priority = 94 };
+	unsigned int w, h, i, len;
+	u16 *px;
+
+	sched_setscheduler(current, SCHED_FIFO, &param);
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(ct07_spicap_wq, ct07_spicap_pending);
+		ct07_spicap_pending = 0;
+		if (primary_display_is_sleepd())
+			continue;
+		if (primary_display_capture_framebuffer_ovl((unsigned long)ct07_spicap_buf,
+							    eRGB565) == -1)
+			continue;
+		w = primary_display_get_width();
+		h = primary_display_get_height();
+		len = w * h * 2;
+		memcpy(ct07_spicap_tx, ct07_spicap_buf, len);
+		px = ct07_spicap_tx;
+		for (i = 0; i < w * h; i++)
+			px[i] = swab16(px[i]);
+		ct07_lcm_spi_send_frame(ct07_spicap_tx, len);
+	}
+	return 0;
+}
+
+static void ct07_spicap_start(void)
+{
+	size_t sz = (primary_display_get_width() * primary_display_get_height() + 32) * 2;
+	struct task_struct *t;
+
+	if (primary_display_get_width() != 240)
+		return;
+	/* stock: kmalloc(GFP_KERNEL | GFP_DMA) x2, pointers rounded up to 64 */
+	ct07_spicap_buf = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
+	ct07_spicap_tx = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
+	if (!ct07_spicap_buf || !ct07_spicap_tx) {
+		DISPERR("[CT07_SPICAP] no buffers\n");
+		return;
+	}
+	ct07_spicap_buf = PTR_ALIGN(ct07_spicap_buf, 64);
+	ct07_spicap_tx = PTR_ALIGN(ct07_spicap_tx, 64);
+	t = kthread_run(ct07_spicap_thread, NULL, "trigger_spiCap_thread");
+	if (IS_ERR(t))
+		DISPERR("[CT07_SPICAP] thread failed: %ld\n", PTR_ERR(t));
+	else
+		pr_notice("[CT07_SPICAP] SPI frame pusher started (%ux%u)\n",
+			  primary_display_get_width(), primary_display_get_height());
+}
+
 #define ALIGN_TO(x, n)	(((x) + ((n) - 1)) & ~((n) - 1))
 
 
@@ -2261,6 +2326,7 @@ static int mtkfb_probe(struct device *dev)
 	/* this function will get fb_heap base address to ion for management frame buffer */
 	ion_drv_create_FB_heap(mtkfb_get_fb_base(), mtkfb_get_fb_size() - DAL_GetLayerSize());
 	fbdev->state = MTKFB_ACTIVE;
+	ct07_spicap_start();
 
 #ifdef FPGA_DEBUG_PAN
 #if 0

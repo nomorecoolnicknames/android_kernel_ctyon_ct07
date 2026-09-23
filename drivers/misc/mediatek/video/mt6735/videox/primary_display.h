@@ -267,6 +267,10 @@ int primary_display_get_pages(void);
 int primary_display_set_overlay_layer(primary_disp_input_config *input);
 int primary_display_is_alive(void);
 int primary_display_is_sleepd(void);
+/* CT07: SPI panel frame pusher, defined in common/mtkfb.c */
+#include <linux/wait.h>
+extern int ct07_spicap_pending;
+extern wait_queue_head_t ct07_spicap_wq;
 int primary_display_is_sleepd_nolock(void);
 int primary_display_wait_for_vsync(void *config);
 unsigned int primary_display_get_ticket(void);
