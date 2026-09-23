@@ -248,6 +248,37 @@ int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len)
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_frame);
 
+/*
+ * Window write (DCS CASET/RASET/RAMWR) of rows y0..y0+rows-1 of a
+ * byte-swapped RGB565 frame. rows * width * 2 must stay a multiple of
+ * 1024 above 1 KiB (mt_spi DMA packet rule). DISPON is sent once, after
+ * the first frame, instead of after every frame as stock does.
+ */
+int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
+			   unsigned int rows, unsigned int width)
+{
+	static bool dispon;
+	unsigned int x1 = width - 1, y1 = y0 + rows - 1;
+	unsigned char win[4];
+	int ret;
+
+	win[0] = 0; win[1] = 0; win[2] = x1 >> 8; win[3] = x1 & 0xff;
+	ct07_lcm_spi_send_cmd(0x2a);
+	ct07_lcm_spi_send_data(win, 4);
+	win[0] = y0 >> 8; win[1] = y0 & 0xff; win[2] = y1 >> 8; win[3] = y1 & 0xff;
+	ct07_lcm_spi_send_cmd(0x2b);
+	ct07_lcm_spi_send_data(win, 4);
+	ret = ct07_lcm_spi_send_cmd(0x2c);
+	if (!ret)
+		ret = ct07_lcm_spi_send_data(buf + y0 * width * 2, rows * width * 2);
+	if (!dispon) {
+		ct07_lcm_spi_send_cmd(0x29);
+		dispon = true;
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_rows);
+
 static int ct07_lcm_spi_probe(struct spi_device *spi)
 {
 	struct ct07_lcm_spi_ctx *ctx;

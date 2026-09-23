@@ -70,60 +70,184 @@
  * logo forever (live 2026-09-23: screencap shows the UI, panel shows logo).
  */
 int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len);
+int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
+			   unsigned int rows, unsigned int width);
 int ct07_spicap_pending;
 DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
-static void *ct07_spicap_buf;	/* WDMA capture target */
-static void *ct07_spicap_tx;	/* byte-swapped copy handed to SPI DMA */
 
-static int ct07_spicap_thread(void *data)
+/*
+ * disp2 (beyond stock): capture and SPI run in two threads on two capture
+ * slots, so the WDMA capture of frame N+1 (about two DDP frames of waiting)
+ * overlaps the SPI DMA of frame N. The SPI side byte-swaps in place,
+ * compares with the previous frame and sends only the changed band of rows
+ * (CASET/RASET window, rows in blocks of 32 because mt_spi DMA needs a
+ * multiple of 1024 bytes: 32 x 480 = 15 x 1024), or nothing at all.
+ * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{partial,stats}.
+ */
+static int ct07_spicap_partial = 1;
+module_param(ct07_spicap_partial, int, 0644);
+static int ct07_spicap_stats = 1;
+module_param(ct07_spicap_stats, int, 0644);
+
+#define CT07_SPICAP_BAND 32
+static void *ct07_spicap_slot[2];	/* WDMA capture targets */
+static int ct07_spicap_ready[2];	/* 1: captured, owned by the SPI thread */
+static u32 *ct07_spicap_prev;		/* last frame sent, already swapped */
+static int ct07_spicap_force_full = 1;
+static DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_txq);
+static unsigned int ct07_spicap_w, ct07_spicap_h;
+
+static struct {
+	u64 cap_ns, spi_ns, t0;
+	unsigned int frames, sent, skipped, rows;
+} ct07_spicap_st;
+
+static int ct07_spicap_capture_thread(void *data)
 {
 	struct sched_param param = {.sched_priority = 94 };
-	unsigned int w, h, i, len;
-	u16 *px;
+	int slot = 0;
+	u64 t;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(ct07_spicap_wq, ct07_spicap_pending);
 		ct07_spicap_pending = 0;
-		if (primary_display_is_sleepd())
+		if (primary_display_is_sleepd()) {
+			ct07_spicap_force_full = 1;	/* panel re-inits on resume */
 			continue;
-		if (primary_display_capture_framebuffer_ovl((unsigned long)ct07_spicap_buf,
-							    eRGB565) == -1)
+		}
+		wait_event_interruptible(ct07_spicap_txq,
+					 !ACCESS_ONCE(ct07_spicap_ready[slot]));
+		t = sched_clock();
+		if (primary_display_capture_framebuffer_ovl(
+			(unsigned long)ct07_spicap_slot[slot], eRGB565) == -1)
 			continue;
-		w = primary_display_get_width();
-		h = primary_display_get_height();
-		len = w * h * 2;
-		memcpy(ct07_spicap_tx, ct07_spicap_buf, len);
-		px = ct07_spicap_tx;
-		for (i = 0; i < w * h; i++)
-			px[i] = swab16(px[i]);
-		ct07_lcm_spi_send_frame(ct07_spicap_tx, len);
+		ct07_spicap_st.cap_ns += sched_clock() - t;
+		smp_wmb();
+		ACCESS_ONCE(ct07_spicap_ready[slot]) = 1;
+		wake_up(&ct07_spicap_txq);
+		slot ^= 1;
+	}
+	return 0;
+}
+
+static void ct07_spicap_stats_tick(void)
+{
+	u64 now = sched_clock(), dt;
+
+	if (!ct07_spicap_st.t0)
+		ct07_spicap_st.t0 = now;
+	if (++ct07_spicap_st.frames < 256)
+		return;
+	dt = now - ct07_spicap_st.t0;
+	if (ct07_spicap_stats && dt)
+		pr_info("[CT07_SPICAP] %u frames in %llu ms: sent %u skipped %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
+			ct07_spicap_st.frames, dt / 1000000, ct07_spicap_st.sent,
+			ct07_spicap_st.skipped,
+			ct07_spicap_st.sent ? ct07_spicap_st.rows / ct07_spicap_st.sent : 0,
+			ct07_spicap_st.cap_ns / 1000 / ct07_spicap_st.frames,
+			ct07_spicap_st.sent ? ct07_spicap_st.spi_ns / 1000 / ct07_spicap_st.sent : 0);
+	memset(&ct07_spicap_st, 0, sizeof(ct07_spicap_st));
+	ct07_spicap_st.t0 = now;
+}
+
+static int ct07_spicap_spi_thread(void *data)
+{
+	struct sched_param param = {.sched_priority = 93 };
+	unsigned int words_row = ct07_spicap_w / 2;	/* 2 px per u32 */
+	unsigned int y, i, first, last, y0, y1;
+	int slot = 0;
+	u32 *cur, *prev, x;
+	u64 t;
+
+	sched_setscheduler(current, SCHED_FIFO, &param);
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(ct07_spicap_txq,
+					 ACCESS_ONCE(ct07_spicap_ready[slot]));
+		smp_rmb();
+		cur = ct07_spicap_slot[slot];
+		first = ct07_spicap_h;
+		last = 0;
+		for (y = 0; y < ct07_spicap_h; y++) {
+			bool dirty = false;
+
+			prev = ct07_spicap_prev + y * words_row;
+			for (i = 0; i < words_row; i++) {
+				x = cur[y * words_row + i];
+				/* stock rev16: panel wants each RGB565 pixel MSB first */
+				x = ((x & 0x00ff00ff) << 8) | ((x >> 8) & 0x00ff00ff);
+				cur[y * words_row + i] = x;
+				if (x != prev[i])
+					dirty = true;
+			}
+			if (dirty) {
+				if (first == ct07_spicap_h)
+					first = y;
+				last = y;
+			}
+		}
+		if (ct07_spicap_force_full || !ct07_spicap_partial) {
+			first = 0;
+			last = ct07_spicap_h - 1;
+		}
+		if (first <= last) {
+			y0 = first / CT07_SPICAP_BAND * CT07_SPICAP_BAND;
+			y1 = min(ct07_spicap_h,
+				 (last / CT07_SPICAP_BAND + 1) * CT07_SPICAP_BAND);
+			t = sched_clock();
+			ct07_lcm_spi_send_rows((u8 *)cur, y0, y1 - y0, ct07_spicap_w);
+			ct07_spicap_st.spi_ns += sched_clock() - t;
+			memcpy(ct07_spicap_prev + y0 * words_row, cur + y0 * words_row,
+			       (y1 - y0) * ct07_spicap_w * 2);
+			ct07_spicap_force_full = 0;
+			ct07_spicap_st.sent++;
+			ct07_spicap_st.rows += y1 - y0;
+		} else {
+			ct07_spicap_st.skipped++;
+		}
+		ct07_spicap_stats_tick();
+		ACCESS_ONCE(ct07_spicap_ready[slot]) = 0;
+		wake_up(&ct07_spicap_txq);
+		slot ^= 1;
 	}
 	return 0;
 }
 
 static void ct07_spicap_start(void)
 {
-	size_t sz = (primary_display_get_width() * primary_display_get_height() + 32) * 2;
+	size_t sz;
 	struct task_struct *t;
+	int i;
 
-	if (primary_display_get_width() != 240)
+	ct07_spicap_w = primary_display_get_width();
+	ct07_spicap_h = primary_display_get_height();
+	if (ct07_spicap_w != 240)
 		return;
-	/* stock: kmalloc(GFP_KERNEL | GFP_DMA) x2, pointers rounded up to 64 */
-	ct07_spicap_buf = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
-	ct07_spicap_tx = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
-	if (!ct07_spicap_buf || !ct07_spicap_tx) {
-		DISPERR("[CT07_SPICAP] no buffers\n");
-		return;
+	sz = (ct07_spicap_w * ct07_spicap_h + 32) * 2;
+	/* stock: kmalloc(GFP_KERNEL | GFP_DMA), pointers rounded up to 64 */
+	for (i = 0; i < 2; i++) {
+		ct07_spicap_slot[i] = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
+		if (!ct07_spicap_slot[i])
+			goto nomem;
+		ct07_spicap_slot[i] = PTR_ALIGN(ct07_spicap_slot[i], 64);
 	}
-	ct07_spicap_buf = PTR_ALIGN(ct07_spicap_buf, 64);
-	ct07_spicap_tx = PTR_ALIGN(ct07_spicap_tx, 64);
-	t = kthread_run(ct07_spicap_thread, NULL, "trigger_spiCap_thread");
+	ct07_spicap_prev = kzalloc(sz, GFP_KERNEL);
+	if (!ct07_spicap_prev)
+		goto nomem;
+	t = kthread_run(ct07_spicap_spi_thread, NULL, "ct07_spicap_spi");
 	if (IS_ERR(t))
-		DISPERR("[CT07_SPICAP] thread failed: %ld\n", PTR_ERR(t));
-	else
-		pr_notice("[CT07_SPICAP] SPI frame pusher started (%ux%u)\n",
-			  primary_display_get_width(), primary_display_get_height());
+		goto fail;
+	t = kthread_run(ct07_spicap_capture_thread, NULL, "trigger_spiCap_thread");
+	if (IS_ERR(t))
+		goto fail;
+	pr_notice("[CT07_SPICAP] SPI frame pusher started (%ux%u, pipelined, partial=%d)\n",
+		  ct07_spicap_w, ct07_spicap_h, ct07_spicap_partial);
+	return;
+fail:
+	DISPERR("[CT07_SPICAP] thread failed: %ld\n", PTR_ERR(t));
+	return;
+nomem:
+	DISPERR("[CT07_SPICAP] no buffers\n");
 }
 
 #define ALIGN_TO(x, n)	(((x) + ((n) - 1)) & ~((n) - 1))
