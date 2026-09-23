@@ -1205,6 +1205,11 @@ static kal_uint32 feature_control(MSDK_SENSOR_FEATURE_ENUM feature_id,
             set_max_framerate_by_scenario((MSDK_SCENARIO_ID_ENUM)*feature_data, *(feature_data+1));
             break;
         case SENSOR_FEATURE_GET_DEFAULT_FRAME_RATE_BY_SCENARIO:
+            /* CT07: the HAL passes the result pointer in the second slot.
+             * After a failed kdSetDriver it passed NULL and the store below
+             * oopsed cameraserver into a kernel panic (2026-09-23 live1). */
+            if (!(uintptr_t)(*(feature_data+1)))
+                return ERROR_INVALID_PARA;
             get_default_framerate_by_scenario((MSDK_SCENARIO_ID_ENUM)*(feature_data), (MUINT32 *)(uintptr_t)(*(feature_data+1)));
             break;
         case SENSOR_FEATURE_SET_TEST_PATTERN:
@@ -1230,6 +1235,8 @@ static kal_uint32 feature_control(MSDK_SENSOR_FEATURE_ENUM feature_id,
             LOG_INF("SENSOR_FEATURE_GET_CROP_INFO scenarioId:%d\n", (UINT32)*feature_data);
 
             wininfo = (SENSOR_WINSIZE_INFO_STRUCT *)(uintptr_t)(*(feature_data+1));
+            if (!wininfo)
+                return ERROR_INVALID_PARA;
 
             switch (*feature_data_32) {
                 case MSDK_SCENARIO_ID_CAMERA_CAPTURE_JPEG:

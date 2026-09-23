@@ -884,6 +884,10 @@ kd_MultiSensorFeatureControl(
 				/* set i2c slave ID */
 				/* KD_SET_I2C_SLAVE_ID(i,g_invokeSocketIdx[i],IMGSENSOR_SET_I2C_ID_STATE); */
 				/*  */
+				if (!g_pInvokeSensorFunc[i]->SensorFeatureControl) {
+					PK_ERR("[%s] no SensorFeatureControl\n", __func__);
+					return -EIO;
+				}
 				ret = g_pInvokeSensorFunc[i]->SensorFeatureControl(FeatureId, pFeaturePara, pFeatureParaLen);
 				if (ERROR_NONE != ret) {
 					PK_ERR("[%s]\n", __func__);
