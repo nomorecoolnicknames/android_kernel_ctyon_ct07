@@ -1421,9 +1421,22 @@ static void mt_eint_irq_ack(struct irq_data *data)
 	mt_eint_ack(data->hwirq);
 }
 
+/*
+ * CT07: EINT_FUNC.gpio[] is only filled by the DT xlate path. An EINT set
+ * up through gpio_to_irq() (msdc1 card detect) used to read uninitialised
+ * kmalloc memory here and WARN in gpio_to_desc ('invalid GPIO -645220332',
+ * 8.71 s, 2026-09-23); gpiolib then returned level 0. Keep exactly that
+ * behaviour (level 0) without touching an invalid GPIO. Recording the pin
+ * in mt_gpio_to_irq() instead (d1a27d74) changed the dual-edge polarity of
+ * that EINT and boot-looped the phone before adbd (cam2, bisected 2026-09-24).
+ */
 static int mt_eint_get_level(unsigned int eint_num)
 {
-	return __gpio_get_value(EINT_FUNC.gpio[eint_num]);
+	unsigned int gpio = EINT_FUNC.gpio[eint_num];
+
+	if (!gpio_is_valid(gpio))
+		return 0;
+	return __gpio_get_value(gpio);
 }
 
 static unsigned int mt_eint_flip_edge(struct eint_chip *chip,
@@ -1577,6 +1590,9 @@ static int __init mt_eint_init(void)
 					GFP_KERNEL);
 	EINT_FUNC.gpio = kmalloc(sizeof(unsigned int) * EINT_MAX_CHANNEL,
 					GFP_KERNEL);
+	if (EINT_FUNC.gpio)	/* ~0u = no GPIO known for this EINT */
+		memset(EINT_FUNC.gpio, 0xff,
+		       sizeof(unsigned int) * EINT_MAX_CHANNEL);
 	mt_eint_chip = kmalloc(sizeof(struct eint_chip), GFP_KERNEL);
 	mt_eint_chip->max_channel = EINT_MAX_CHANNEL;
 	mt_eint_chip->dual_edges = kcalloc(mt_eint_chip->max_channel,
