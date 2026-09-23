@@ -17,6 +17,7 @@
 #include <linux/dma-buf.h>
 #include <linux/uaccess.h>
 #include <linux/atomic.h>
+#include <linux/math64.h>
 #include <asm/cacheflush.h>
 #include <linux/io.h>
 
@@ -142,11 +143,12 @@ static void ct07_spicap_stats_tick(void)
 	dt = now - ct07_spicap_st.t0;
 	if (ct07_spicap_stats && dt)
 		pr_info("[CT07_SPICAP] %u frames in %llu ms: sent %u skipped %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
-			ct07_spicap_st.frames, dt / 1000000, ct07_spicap_st.sent,
+			ct07_spicap_st.frames, div_u64(dt, 1000000), ct07_spicap_st.sent,
 			ct07_spicap_st.skipped,
 			ct07_spicap_st.sent ? ct07_spicap_st.rows / ct07_spicap_st.sent : 0,
-			ct07_spicap_st.cap_ns / 1000 / ct07_spicap_st.frames,
-			ct07_spicap_st.sent ? ct07_spicap_st.spi_ns / 1000 / ct07_spicap_st.sent : 0);
+			div_u64(ct07_spicap_st.cap_ns, 1000 * ct07_spicap_st.frames),
+			ct07_spicap_st.sent ?
+				div_u64(ct07_spicap_st.spi_ns, 1000 * ct07_spicap_st.sent) : 0);
 	memset(&ct07_spicap_st, 0, sizeof(ct07_spicap_st));
 	ct07_spicap_st.t0 = now;
 }
