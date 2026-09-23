@@ -405,7 +405,11 @@ int c2k_gpio_set_irq_type(int gpio, unsigned int type)
 		return -EINVAL;
 	}
 #else
-	gpio_set_debounce(gpio, 0);
+	/* CT07: C2K sync GPIOs may have no gpio_chip behind them; debouncing
+	 * them only produced 'gpiod_set_debounce: invalid GPIO' every heartbeat
+	 * (~15 s). The call cannot succeed there, so skip it. */
+	if (gpio_is_valid(gpio) && gpiod_to_chip(gpio_to_desc(gpio)))
+		gpio_set_debounce(gpio, 0);
 	irq_set_irq_type(irq, type);
 #endif
 	/*pr_debug("[C2K]set irq(%d) type(%d) done\n", irq, type); */
