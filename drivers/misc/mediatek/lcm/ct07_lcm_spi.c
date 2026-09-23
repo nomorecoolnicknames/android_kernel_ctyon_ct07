@@ -31,6 +31,15 @@ struct ct07_lcm_spi_ctx {
 };
 
 static DEFINE_MUTEX(ct07_lcm_spi_lock);
+/*
+ * Commands and register parameters come from the stack or from const
+ * tables at any byte address, but mt_spi DMA wants a 4-byte aligned TX
+ * buffer ("mt-spi: Warning! Tx_DMA address should be 4Byte alignment,
+ * buf:db2f7eef" on every frame, disp1 live 2026-09-23). Short transfers go
+ * through this bounce buffer; frames are already 64-byte aligned.
+ */
+#define CT07_LCM_SPI_BOUNCE 64
+static u8 ct07_lcm_spi_bounce[CT07_LCM_SPI_BOUNCE] __aligned(L1_CACHE_BYTES);
 static struct ct07_lcm_spi_ctx *ct07_lcm_spi;
 #ifdef CONFIG_CT07_BRINGUP
 static const char *ct07_lcm_diag_stage_name = "pre_init";
@@ -194,6 +203,11 @@ static int ct07_lcm_spi_xfer(const unsigned char *data, unsigned int len,
 		dev_err(&ctx->spi->dev, "[CT07_LCM_SPI] rs select failed: %d\n", ret);
 		mutex_unlock(&ct07_lcm_spi_lock);
 		return ret;
+	}
+
+	if (((unsigned long)data & 3) && len <= CT07_LCM_SPI_BOUNCE) {
+		memcpy(ct07_lcm_spi_bounce, data, len);
+		xfer.tx_buf = ct07_lcm_spi_bounce;
 	}
 
 	spi_message_init(&msg);
