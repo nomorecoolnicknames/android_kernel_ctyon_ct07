@@ -476,6 +476,8 @@ CONFIG_CRYPTO_LZO=y
 # CONFIG_CRYPTO_ANSI_CPRNG is not set
 # CONFIG_CRYPTO_HW is not set
 CONFIG_LIBCRC32C=y
-CONFIG_ARM_APPENDED_DTB=y
-CONFIG_ARM_ATAG_DTB_COMPAT=y
-CONFIG_ARM_ATAG_DTB_COMPAT_CMDLINE_FROM_BOOTLOADER=y
+# CT07: LK (boot_linux_fdt) patches its own copy of the appended DTB at the
+# boot.img tags address and passes it in r2. CONFIG_ARM_APPENDED_DTB makes the
+# decompressor throw that away and boot on the raw DTB (2 GiB /memory, no
+# atag,* chosen props, no LK cmdline). The stock zImage has no such code.
+# CONFIG_ARM_APPENDED_DTB is not set
