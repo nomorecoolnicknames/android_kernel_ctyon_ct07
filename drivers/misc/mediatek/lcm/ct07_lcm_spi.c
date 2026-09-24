@@ -32,6 +32,17 @@ struct ct07_lcm_spi_ctx {
 
 static DEFINE_MUTEX(ct07_lcm_spi_lock);
 /*
+ * A register table (panel init / sleep) and a window write (CASET, RASET,
+ * RAMWR, pixels) must not interleave: the frame pusher and the LCM
+ * suspend/resume path run in different threads, and a command landing
+ * between RAMWR and its data would be taken as pixels or the other way
+ * round. ct07_lcm_spi_lock only covers single transfers.
+ */
+static DEFINE_MUTEX(ct07_lcm_spi_seq_lock);
+/* bumped after every panel (re)initialisation: its GRAM is not ours then */
+unsigned int ct07_lcm_spi_epoch;
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_epoch);
+/*
  * Commands and register parameters come from the stack or from const
  * tables at any byte address, but mt_spi DMA wants a 4-byte aligned TX
  * buffer ("mt-spi: Warning! Tx_DMA address should be 4Byte alignment,
@@ -248,6 +259,18 @@ int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len)
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_frame);
 
+void ct07_lcm_spi_seq_begin(void)
+{
+	mutex_lock(&ct07_lcm_spi_seq_lock);
+}
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_seq_begin);
+
+void ct07_lcm_spi_seq_end(void)
+{
+	mutex_unlock(&ct07_lcm_spi_seq_lock);
+}
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_seq_end);
+
 /*
  * Window write (DCS CASET/RASET/RAMWR) of rows y0..y0+rows-1 of a
  * byte-swapped RGB565 frame. rows * width * 2 must stay a multiple of
@@ -262,6 +285,7 @@ int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
 	unsigned char win[4];
 	int ret;
 
+	ct07_lcm_spi_seq_begin();
 	win[0] = 0; win[1] = 0; win[2] = x1 >> 8; win[3] = x1 & 0xff;
 	ct07_lcm_spi_send_cmd(0x2a);
 	ct07_lcm_spi_send_data(win, 4);
@@ -275,6 +299,7 @@ int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
 		ct07_lcm_spi_send_cmd(0x29);
 		dispon = true;
 	}
+	ct07_lcm_spi_seq_end();
 	return ret;
 }
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_send_rows);

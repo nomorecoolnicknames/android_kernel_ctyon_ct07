@@ -79,13 +79,14 @@ static void push_table(const struct lcm_setting_table *table,
 	unsigned int i;
 	int ret;
 
+	ct07_lcm_spi_seq_begin();
 	for (i = 0; i < count; i++) {
 		switch (table[i].cmd) {
 		case REGFLAG_DELAY:
 			MDELAY(table[i].count);
 			break;
 		case REGFLAG_END_OF_TABLE:
-			return;
+			goto out;
 		default:
 			ret = ct07_lcm_spi_send_cmd(table[i].cmd);
 			if (ret) {
@@ -105,6 +106,8 @@ static void push_table(const struct lcm_setting_table *table,
 			break;
 		}
 	}
+out:
+	ct07_lcm_spi_seq_end();
 }
 
 static void send_ctrl_cmd(unsigned int cmd)
@@ -169,6 +172,8 @@ static void lcm_init(void)
 
 	push_table(lcm_initialization_setting,
 		   ARRAY_SIZE(lcm_initialization_setting));
+	/* reset + init: the frame pusher must resend the whole frame */
+	ct07_lcm_spi_epoch++;
 	ct07_lcm_diag_stage("nv3029_init_done");
 	pr_notice("[CT07_LCM] nv3029 init done\n");
 }
