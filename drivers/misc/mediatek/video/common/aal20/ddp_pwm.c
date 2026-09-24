@@ -16,6 +16,9 @@
 #include <ddp_pwm_mux.h>
 
 /* #include <mach/mt_gpio.h> */
+#ifdef CONFIG_CT07_BL_PULSE
+#include <mt-plat/mt_gpio.h>
+#endif
 #include <disp_dts_gpio.h> /* DTS GPIO */
 #include <leds_drv.h>
 #include <leds_sw.h>
@@ -253,12 +256,72 @@ static int disp_pwm_level_remap(disp_pwm_id_t id, int level_1024)
 	return level_1024;
 }
 
+#ifdef CONFIG_CT07_BL_PULSE
+/*
+ * CT07: the backlight IC hangs off GPIO69 in GPIO mode and counts pulses;
+ * the DISP_PWM duty never reaches it (live 2026-09-24: mtgpio pin 69 is
+ * mode 0, output high; brightness 0 left the backlight on, so the blanked
+ * normally-white panel showed solid white). Stock disp_pwm_set_backlight
+ * (c043e9e8 in the boot-stock.bin kernel) does, under a spinlock:
+ *   level 0: GPIO69 low, udelay(200); the IC shuts down while it stays low;
+ *   else:    step = level_1024 / 128; when the step changed or the IC was
+ *            off: low 80 us, high 100 us (disp_driverIC_en, c043e274),
+ *            then 7 - step pulses of low 5 us / high 5 us (step 7 = full).
+ */
+#define CT07_BL_GPIO (69 | 0x80000000)
+static DEFINE_SPINLOCK(ct07_bl_lock);
+static int ct07_bl_step = -1;	/* stock starts at 0 and skips a first step-0 request */
+static int ct07_bl_off;
+
+static void ct07_bl_gpio_out(void)
+{
+	mt_set_gpio_mode(CT07_BL_GPIO, GPIO_MODE_00);
+	mt_set_gpio_dir(CT07_BL_GPIO, GPIO_DIR_OUT);
+	mt_set_gpio_pull_enable(CT07_BL_GPIO, GPIO_PULL_DISABLE);
+}
+
+static void ct07_bl_set(int level_1024)
+{
+	unsigned long flags;
+	int step = min(level_1024 / 128, 7);
+	int i;
+
+	spin_lock_irqsave(&ct07_bl_lock, flags);
+	if (level_1024 <= 0) {
+		ct07_bl_gpio_out();
+		mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ZERO);
+		udelay(200);
+		ct07_bl_step = 0;
+		ct07_bl_off = 1;
+	} else if (step != ct07_bl_step || ct07_bl_off) {
+		ct07_bl_gpio_out();
+		mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ZERO);
+		udelay(80);
+		mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ONE);
+		udelay(100);
+		for (i = 0; i < 7 - step; i++) {
+			mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ZERO);
+			udelay(5);
+			mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ONE);
+			udelay(5);
+		}
+		ct07_bl_step = step;
+		ct07_bl_off = 0;
+	}
+	spin_unlock_irqrestore(&ct07_bl_lock, flags);
+}
+#endif
+
 int disp_pwm_set_backlight(disp_pwm_id_t id, int level_1024)
 {
 	int ret;
 
 #ifdef MTK_DISP_IDLE_LP
 	disp_exit_idle_ex("disp_pwm_set_backlight");
+#endif
+
+#ifdef CONFIG_CT07_BL_PULSE
+	ct07_bl_set(level_1024);
 #endif
 
 	/* Always write registers by CPU */

@@ -22,6 +22,16 @@ config CT07_BRINGUP
 	  KPOC override, suspend blocking, restart traces, and an optional timed
 	  emergency warm reboot. Production kernels must leave this disabled.
 
+config CT07_BL_PULSE
+	bool "CT07 LCD backlight: pulse dimming on GPIO69"
+	default n
+	help
+	  The CT07 LCD backlight IC is switched and dimmed by counting pulses
+	  on GPIO69 (the DISP_PWM pad, which LK leaves in GPIO mode, driven
+	  high), not by the DISP_PWM duty cycle. Say Y to drive it the way
+	  the stock kernel's disp_pwm_set_backlight() does; without it the
+	  backlight stays at LK's full level, even with the screen off.
+
 config MTK_LEGACY
 	bool "MTK LEGACY driver API support"
 	help
