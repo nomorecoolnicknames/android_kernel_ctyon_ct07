@@ -11,6 +11,35 @@
 		bootargs = "console=tty0 console=ttyMT0,921600n1 root=/dev/ram initrd=0x44000000,0x300000 loglevel=8 androidboot.hardware=mt6735";
 	};
 
+	/*
+	 * Android 9 first-stage mount (system/core/init/init_first_stage.cpp,
+	 * fs_mgr_fstab.cpp read_fstab_from_dt). Nougat init ignores this node.
+	 * boot_devices names both spellings of the eMMC platform device so that
+	 * /dev/block/by-name/<part> exists whichever one ueventd derives from
+	 * sysfs: TWRP 3.7.0_9 created platform/mtk-msdc.0/by-name, the stock M
+	 * ramdisk used platform/mtk-msdc.0/11230000.msdc0/by-name. The first
+	 * stage matches basename(dev) against the uevent PARTNAME, so dev must
+	 * be a by-name path, not mmcblk0p20. No /vendor: it is /system/vendor.
+	 */
+	firmware {
+		android {
+			compatible = "android,firmware";
+			boot_devices = "mtk-msdc.0,mtk-msdc.0/11230000.msdc0";
+
+			fstab {
+				compatible = "android,fstab";
+
+				system {
+					compatible = "android,system";
+					dev = "/dev/block/by-name/system";
+					type = "ext4";
+					mnt_flags = "ro,barrier=1";
+					fsmgr_flags = "wait";
+				};
+			};
+		};
+	};
+
 	mtk-msdc.0 {
 		compatible = "simple-bus";
 		#address-cells = <0x01>;
