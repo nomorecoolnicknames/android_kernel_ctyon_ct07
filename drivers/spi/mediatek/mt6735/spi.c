@@ -48,10 +48,8 @@
 
 /*open base log out*/
 /*#define SPI_DEBUG*/
-#define SPI_DEBUG
 /*open verbose log out*/
 /*#define SPI_VERBOSE*/
-#define SPI_VERBOSE
 
 #define IDLE 0
 #define INPROGRESS 1
