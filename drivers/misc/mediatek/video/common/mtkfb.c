@@ -89,11 +89,13 @@ DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
  *
  * ct07_spicap_mode 0 (stock-like): one capture per trigger,
  *   ct07_capture_once(), 1.5-2 DDP frames each with the path lock held.
- * ct07_spicap_mode 1 (continuous): a trigger attaches WDMA0 behind OVL0
+ * ct07_spicap_mode 1 (continuous, default; pie5 benchmark: 21.5-24.8
+ *   frames/s sent against 12.0-13.9 in mode 0): a trigger attaches WDMA0 behind OVL0
  *   (ct07_memout_start); each DDP frame lands in a slot, and the WDMA0
  *   frame-done IRQ publishes it and points WDMA0 at a free slot. After
  *   CT07_SPICAP_IDLE frames with neither a trigger nor a change, WDMA0 is
- *   detached again.
+ *   detached again. A trigger that cannot attach is captured the mode-0
+ *   way; WDMA0 giving no frame for 250 ms switches to mode 0 for good.
  * Mode 0 also captures once more when no trigger came for
  * ct07_spicap_settle_ms (0 = off): the last frame of an animation can be
  * torn or not yet complete at the OVL output (m5c: "the tear is real at the
@@ -104,7 +106,7 @@ DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
  * /sys/kernel/debug/ct07_spicap_panel: the panel mirror, 240x320 RGB565
  * big-endian, i.e. what the panel is supposed to show right now.
  */
-static int ct07_spicap_mode;
+static int ct07_spicap_mode = 1;
 module_param(ct07_spicap_mode, int, 0644);
 static int ct07_spicap_settle_ms = 100;
 module_param(ct07_spicap_settle_ms, int, 0644);
@@ -209,8 +211,8 @@ void ct07_spicap_memout_stopped(void)
 	spin_unlock_irqrestore(&ct07_sc_lock, flags);
 }
 
-/* continuous mode: WDMA0 on the path until the screen goes idle */
-static void ct07_spicap_trigger_cont(void)
+/* continuous mode: WDMA0 on the path until the screen goes idle; 0: attached */
+static int ct07_spicap_trigger_cont(void)
 {
 	unsigned long flags;
 	int s = -1;
@@ -226,9 +228,12 @@ static void ct07_spicap_trigger_cont(void)
 		}
 	}
 	spin_unlock_irqrestore(&ct07_sc_lock, flags);
-	/* not direct-link (idle decouple, mirror) or asleep: nothing to take */
-	if (s >= 0 && ct07_memout_start(ct07_sc.mva[s]))
+	/* not direct-link (idle decouple, mirror), asleep, WDMA0 busy */
+	if (s >= 0 && ct07_memout_start(ct07_sc.mva[s])) {
 		ct07_spicap_memout_stopped();
+		return -1;
+	}
+	return ct07_sc.wdma >= 0 ? 0 : -1;
 }
 
 /* stock-like: one capture per trigger */
@@ -290,9 +295,11 @@ static int ct07_spicap_capture_thread(void *data)
 				seen = ct07_sc.frame;
 				last_j = jiffies;
 			} else if (time_after(jiffies, last_j + HZ / 4)) {
-				pr_notice_ratelimited("[CT07_SPICAP] WDMA0 gave no frame for 250 ms, detached\n");
+				pr_notice("[CT07_SPICAP] WDMA0 gave no frame for 250 ms, back to mode 0\n");
+				ct07_spicap_mode = 0;
+				cont = false;
 				ct07_memout_stop();
-				ct07_spicap_pending = 1;	/* start over */
+				ct07_spicap_pending = 1;	/* take this frame the mode-0 way */
 			}
 			/* a trigger since the SPI side saw the screen idle cancels it */
 			if (!cont || (ct07_sc.detach && !ct07_spicap_pending))
@@ -306,7 +313,8 @@ static int ct07_spicap_capture_thread(void *data)
 		if (cont) {
 			seen = ct07_sc.frame;
 			last_j = jiffies;
-			ct07_spicap_trigger_cont();
+			if (ct07_spicap_trigger_cont())
+				ct07_spicap_trigger_once(false);
 		} else {
 			ct07_spicap_trigger_once(settle_now);
 			settle = !settle_now;	/* re-arm after real triggers only */
