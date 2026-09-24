@@ -9,6 +9,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/kthread.h>
 #include <linux/vmalloc.h>
+#include <linux/debugfs.h>
 #include <linux/semaphore.h>
 #include <linux/mutex.h>
 #include <linux/suspend.h>
@@ -70,85 +71,262 @@
  * trigger_spiCap_thread / SpiSendData). Without it the panel keeps LK's
  * logo forever (live 2026-09-23: screencap shows the UI, panel shows logo).
  */
-int ct07_lcm_spi_send_frame(const unsigned char *buf, unsigned int len);
 int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
 			   unsigned int rows, unsigned int width);
+extern unsigned int ct07_lcm_spi_epoch;
 int ct07_spicap_pending;
 DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
 
 /*
- * disp2 (beyond stock): capture and SPI run in two threads on two capture
- * slots, so the WDMA capture of frame N+1 (about two DDP frames of waiting)
- * overlaps the SPI DMA of frame N. The SPI side byte-swaps in place,
- * compares with the previous frame and sends only the changed band of rows
- * (CASET/RASET window, rows in blocks of 32 because mt_spi DMA needs a
- * multiple of 1024 bytes: 32 x 480 = 15 x 1024), or nothing at all.
- * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{partial,stats}.
+ * WDMA0 writes RGB565 frames into three slots, mapped into the display
+ * M4U once. A captured slot is published as "ready" (a newer frame
+ * replaces one the SPI side has not taken yet). The SPI thread takes it,
+ * byte-swaps it into the panel mirror (what the NV3029G holds) and sends
+ * only the changed band of rows through CASET/RASET/RAMWR, in blocks of 32
+ * rows (mt_spi DMA needs a multiple of 1024 bytes: 32 x 480 = 15 x 1024),
+ * or nothing at all. The CPU never writes a slot, so reading one only
+ * needs a cache invalidate.
+ *
+ * ct07_spicap_mode 0 (stock-like): one capture per trigger,
+ *   ct07_capture_once(), 1.5-2 DDP frames each with the path lock held.
+ * ct07_spicap_mode 1 (continuous): a trigger attaches WDMA0 behind OVL0
+ *   (ct07_memout_start); each DDP frame lands in a slot, and the WDMA0
+ *   frame-done IRQ publishes it and points WDMA0 at a free slot. After
+ *   CT07_SPICAP_IDLE frames with neither a trigger nor a change, WDMA0 is
+ *   detached again.
+ * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{mode,partial,stats}
+ * (partial 0 = always full frames, stats = log every 256 frames).
+ * /sys/kernel/debug/ct07_spicap_panel: the panel mirror, 240x320 RGB565
+ * big-endian, i.e. what the panel is supposed to show right now.
  */
+static int ct07_spicap_mode;
+module_param(ct07_spicap_mode, int, 0644);
 static int ct07_spicap_partial = 1;
 module_param(ct07_spicap_partial, int, 0644);
 static int ct07_spicap_stats = 1;
 module_param(ct07_spicap_stats, int, 0644);
 
 #define CT07_SPICAP_BAND 32
-static void *ct07_spicap_slot[2];	/* WDMA capture targets */
-static int ct07_spicap_ready[2];	/* 1: captured, owned by the SPI thread */
-static u32 *ct07_spicap_prev;		/* last frame sent, already swapped */
-static int ct07_spicap_force_full = 1;
+#define CT07_SPICAP_SLOTS 3
+#define CT07_SPICAP_IDLE 8
+
+enum { CT07_SLOT_FREE, CT07_SLOT_WDMA, CT07_SLOT_READY, CT07_SLOT_SPI };
+
+static struct {
+	void *va[CT07_SPICAP_SLOTS];
+	unsigned int mva[CT07_SPICAP_SLOTS];
+	int state[CT07_SPICAP_SLOTS];
+	int ready;			/* newest complete slot, -1: none */
+	int wdma;			/* continuous: slot WDMA0 writes, -1: detached */
+	unsigned int frame;		/* continuous: frames completed */
+	unsigned int trigger_frame;	/* frame at the last trigger */
+	int detach;			/* SPI side found the screen idle */
+	u64 cap_ns;			/* stats since the last report */
+	unsigned int captured, dropped, lost;
+} ct07_sc = { .ready = -1, .wdma = -1 };
+static DEFINE_SPINLOCK(ct07_sc_lock);
+static bool ct07_spicap_cont_ok;	/* WDMA0 IRQ callback registered */
+static u32 *ct07_spicap_prev;		/* panel mirror, byte-swapped; SPI TX buffer */
+static DEFINE_MUTEX(ct07_spicap_prev_lock);
 static DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_txq);
 static unsigned int ct07_spicap_w, ct07_spicap_h;
 
 static struct {
-	u64 cap_ns, spi_ns, t0;
+	u64 spi_ns, t0;
 	unsigned int frames, sent, skipped, rows;
 } ct07_spicap_st;
+
+/* ct07_sc_lock held */
+static int ct07_slot_free(void)
+{
+	int i;
+
+	for (i = 0; i < CT07_SPICAP_SLOTS; i++)
+		if (ct07_sc.state[i] == CT07_SLOT_FREE)
+			return i;
+	return -1;
+}
+
+/* ct07_sc_lock held: slot s holds a complete frame */
+static void ct07_slot_publish(int s)
+{
+	if (ct07_sc.ready >= 0) {
+		ct07_sc.state[ct07_sc.ready] = CT07_SLOT_FREE;
+		ct07_sc.dropped++;
+	}
+	ct07_sc.state[s] = CT07_SLOT_READY;
+	ct07_sc.ready = s;
+	ct07_sc.captured++;
+}
+
+/* WDMA0 frame done while ct07 memout is on: IRQ context, vertical blanking */
+void ct07_spicap_frame_done(void)
+{
+	int s, n;
+
+	spin_lock(&ct07_sc_lock);
+	s = ct07_sc.wdma;
+	if (s < 0 || ct07_memout_target() != ct07_sc.mva[s]) {
+		ct07_sc.lost++;
+		goto out;
+	}
+	ct07_slot_publish(s);
+	/* s is ready now and SPI holds at most one slot: one is free */
+	n = ct07_slot_free();
+	if (WARN_ON_ONCE(n < 0)) {
+		ct07_sc.ready = -1;
+		ct07_sc.state[s] = CT07_SLOT_WDMA;
+		goto out;
+	}
+	ct07_sc.state[n] = CT07_SLOT_WDMA;
+	ct07_sc.wdma = n;
+	ct07_memout_retarget(ct07_sc.mva[n]);
+	ct07_sc.frame++;
+	wake_up(&ct07_spicap_txq);
+out:
+	spin_unlock(&ct07_sc_lock);
+}
+
+/* WDMA0 is off the path (ct07_memout_stop, suspend, session mode switch) */
+void ct07_spicap_memout_stopped(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ct07_sc_lock, flags);
+	if (ct07_sc.wdma >= 0)
+		ct07_sc.state[ct07_sc.wdma] = CT07_SLOT_FREE;
+	ct07_sc.wdma = -1;
+	ct07_sc.detach = 0;
+	spin_unlock_irqrestore(&ct07_sc_lock, flags);
+}
+
+/* continuous mode: WDMA0 on the path until the screen goes idle */
+static void ct07_spicap_trigger_cont(void)
+{
+	unsigned long flags;
+	int s = -1;
+
+	spin_lock_irqsave(&ct07_sc_lock, flags);
+	ct07_sc.trigger_frame = ct07_sc.frame;
+	ct07_sc.detach = 0;
+	if (ct07_sc.wdma < 0) {
+		s = ct07_slot_free();
+		if (s >= 0) {
+			ct07_sc.state[s] = CT07_SLOT_WDMA;
+			ct07_sc.wdma = s;
+		}
+	}
+	spin_unlock_irqrestore(&ct07_sc_lock, flags);
+	/* not direct-link (idle decouple, mirror) or asleep: nothing to take */
+	if (s >= 0 && ct07_memout_start(ct07_sc.mva[s]))
+		ct07_spicap_memout_stopped();
+}
+
+/* stock-like: one capture per trigger */
+static void ct07_spicap_trigger_once(void)
+{
+	unsigned long flags;
+	int s, ret;
+	u64 t;
+
+	spin_lock_irqsave(&ct07_sc_lock, flags);
+	s = ct07_slot_free();	/* three slots: ready and SPI take two at most */
+	if (s >= 0)
+		ct07_sc.state[s] = CT07_SLOT_WDMA;
+	spin_unlock_irqrestore(&ct07_sc_lock, flags);
+	if (s < 0)
+		return;
+	t = sched_clock();
+	ret = ct07_capture_once(ct07_sc.mva[s]);
+	t = sched_clock() - t;
+	spin_lock_irqsave(&ct07_sc_lock, flags);
+	if (ret) {
+		ct07_sc.state[s] = CT07_SLOT_FREE;
+	} else {
+		ct07_sc.cap_ns += t;
+		ct07_slot_publish(s);
+	}
+	spin_unlock_irqrestore(&ct07_sc_lock, flags);
+	if (!ret)
+		wake_up(&ct07_spicap_txq);
+}
 
 static int ct07_spicap_capture_thread(void *data)
 {
 	struct sched_param param = {.sched_priority = 94 };
-	int slot = 0;
-	u64 t;
+	unsigned long last_j = jiffies;
+	unsigned int seen = 0;
+	bool cont;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
-		wait_event_interruptible(ct07_spicap_wq, ct07_spicap_pending);
-		ct07_spicap_pending = 0;
-		if (primary_display_is_sleepd()) {
-			ct07_spicap_force_full = 1;	/* panel re-inits on resume */
-			continue;
+		if (ct07_sc.wdma >= 0)
+			wait_event_interruptible_timeout(ct07_spicap_wq,
+				ct07_spicap_pending || ct07_sc.detach, HZ / 10);
+		else
+			wait_event_interruptible(ct07_spicap_wq,
+				ct07_spicap_pending || ct07_sc.detach);
+		cont = ct07_spicap_mode && ct07_spicap_cont_ok;
+
+		if (ct07_sc.wdma >= 0) {
+			if (ACCESS_ONCE(ct07_sc.frame) != seen) {
+				seen = ct07_sc.frame;
+				last_j = jiffies;
+			} else if (time_after(jiffies, last_j + HZ / 4)) {
+				pr_notice_ratelimited("[CT07_SPICAP] WDMA0 gave no frame for 250 ms, detached\n");
+				ct07_memout_stop();
+				ct07_spicap_pending = 1;	/* start over */
+			}
+			/* a trigger since the SPI side saw the screen idle cancels it */
+			if (!cont || (ct07_sc.detach && !ct07_spicap_pending))
+				ct07_memout_stop();
 		}
-		wait_event_interruptible(ct07_spicap_txq,
-					 !ACCESS_ONCE(ct07_spicap_ready[slot]));
-		t = sched_clock();
-		if (primary_display_capture_framebuffer_ovl(
-			(unsigned long)ct07_spicap_slot[slot], eRGB565) == -1)
+		if (!ct07_spicap_pending)
 			continue;
-		ct07_spicap_st.cap_ns += sched_clock() - t;
-		smp_wmb();
-		ACCESS_ONCE(ct07_spicap_ready[slot]) = 1;
-		wake_up(&ct07_spicap_txq);
-		slot ^= 1;
+		ct07_spicap_pending = 0;
+		if (primary_display_is_sleepd())
+			continue;
+		if (cont) {
+			seen = ct07_sc.frame;
+			last_j = jiffies;
+			ct07_spicap_trigger_cont();
+		} else {
+			ct07_spicap_trigger_once();
+		}
 	}
 	return 0;
 }
 
 static void ct07_spicap_stats_tick(void)
 {
-	u64 now = sched_clock(), dt;
+	u64 now = sched_clock(), dt, cap_ns, fps10;
+	unsigned int captured, dropped, lost;
+	unsigned long flags;
 
 	if (!ct07_spicap_st.t0)
 		ct07_spicap_st.t0 = now;
 	if (++ct07_spicap_st.frames < 256)
 		return;
+	spin_lock_irqsave(&ct07_sc_lock, flags);
+	cap_ns = ct07_sc.cap_ns;
+	captured = ct07_sc.captured;
+	dropped = ct07_sc.dropped;
+	lost = ct07_sc.lost;
+	ct07_sc.cap_ns = 0;
+	ct07_sc.captured = ct07_sc.dropped = ct07_sc.lost = 0;
+	spin_unlock_irqrestore(&ct07_sc_lock, flags);
 	dt = now - ct07_spicap_st.t0;
-	if (ct07_spicap_stats && dt)
-		pr_info("[CT07_SPICAP] %u frames in %llu ms: sent %u skipped %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
-			ct07_spicap_st.frames, div_u64(dt, 1000000), ct07_spicap_st.sent,
-			ct07_spicap_st.skipped,
+	if (ct07_spicap_stats && dt) {
+		fps10 = div64_u64((u64)ct07_spicap_st.sent * 10000000000ULL, dt);
+		pr_info("[CT07_SPICAP] mode %d: %u frames in %llu ms, sent %u (%llu.%llu/s) skipped %u, captured %u dropped %u lost %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
+			ct07_spicap_mode, ct07_spicap_st.frames, div_u64(dt, 1000000),
+			ct07_spicap_st.sent, div_u64(fps10, 10), fps10 - div_u64(fps10, 10) * 10,
+			ct07_spicap_st.skipped, captured, dropped, lost,
 			ct07_spicap_st.sent ? ct07_spicap_st.rows / ct07_spicap_st.sent : 0,
-			div_u64(ct07_spicap_st.cap_ns, 1000 * ct07_spicap_st.frames),
+			captured ? div_u64(cap_ns, 1000 * captured) : 0,
 			ct07_spicap_st.sent ?
 				div_u64(ct07_spicap_st.spi_ns, 1000 * ct07_spicap_st.sent) : 0);
+	}
 	memset(&ct07_spicap_st, 0, sizeof(ct07_spicap_st));
 	ct07_spicap_st.t0 = now;
 }
@@ -157,19 +335,37 @@ static int ct07_spicap_spi_thread(void *data)
 {
 	struct sched_param param = {.sched_priority = 93 };
 	unsigned int words_row = ct07_spicap_w / 2;	/* 2 px per u32 */
-	unsigned int y, i, first, last, y0, y1;
-	int slot = 0;
+	unsigned int size = ct07_spicap_w * ct07_spicap_h * 2;
+	unsigned int y, i, first, last, y0, y1, idle = 0, epoch = 0;
+	bool full = true;	/* the panel still holds LK's logo */
+	unsigned long flags;
 	u32 *cur, *prev, x;
+	int s;
 	u64 t;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
-		wait_event_interruptible(ct07_spicap_txq,
-					 ACCESS_ONCE(ct07_spicap_ready[slot]));
-		smp_rmb();
-		cur = ct07_spicap_slot[slot];
+		wait_event_interruptible(ct07_spicap_txq, ACCESS_ONCE(ct07_sc.ready) >= 0);
+		spin_lock_irqsave(&ct07_sc_lock, flags);
+		s = ct07_sc.ready;
+		if (s >= 0) {
+			ct07_sc.ready = -1;
+			ct07_sc.state[s] = CT07_SLOT_SPI;
+		}
+		spin_unlock_irqrestore(&ct07_sc_lock, flags);
+		if (s < 0)
+			continue;
+
+		/* WDMA0 wrote it behind the cache: drop lines of older frames */
+		cur = ct07_sc.va[s];
+		dmac_unmap_area(cur, size, DMA_FROM_DEVICE);
+		if (ACCESS_ONCE(ct07_lcm_spi_epoch) != epoch) {
+			epoch = ct07_lcm_spi_epoch;
+			full = true;	/* the panel was reset and initialised */
+		}
 		first = ct07_spicap_h;
 		last = 0;
+		mutex_lock(&ct07_spicap_prev_lock);
 		for (y = 0; y < ct07_spicap_h; y++) {
 			bool dirty = false;
 
@@ -178,9 +374,10 @@ static int ct07_spicap_spi_thread(void *data)
 				x = cur[y * words_row + i];
 				/* stock rev16: panel wants each RGB565 pixel MSB first */
 				x = ((x & 0x00ff00ff) << 8) | ((x >> 8) & 0x00ff00ff);
-				cur[y * words_row + i] = x;
-				if (x != prev[i])
+				if (x != prev[i]) {
+					prev[i] = x;
 					dirty = true;
+				}
 			}
 			if (dirty) {
 				if (first == ct07_spicap_h)
@@ -188,7 +385,12 @@ static int ct07_spicap_spi_thread(void *data)
 				last = y;
 			}
 		}
-		if (ct07_spicap_force_full || !ct07_spicap_partial) {
+		mutex_unlock(&ct07_spicap_prev_lock);
+		spin_lock_irqsave(&ct07_sc_lock, flags);
+		ct07_sc.state[s] = CT07_SLOT_FREE;
+		spin_unlock_irqrestore(&ct07_sc_lock, flags);
+
+		if (full || !ct07_spicap_partial) {
 			first = 0;
 			last = ct07_spicap_h - 1;
 		}
@@ -197,53 +399,107 @@ static int ct07_spicap_spi_thread(void *data)
 			y1 = min(ct07_spicap_h,
 				 (last / CT07_SPICAP_BAND + 1) * CT07_SPICAP_BAND);
 			t = sched_clock();
-			ct07_lcm_spi_send_rows((u8 *)cur, y0, y1 - y0, ct07_spicap_w);
+			/* a failed write leaves the mirror ahead of the panel */
+			full = ct07_lcm_spi_send_rows((u8 *)ct07_spicap_prev, y0,
+						      y1 - y0, ct07_spicap_w) != 0;
 			ct07_spicap_st.spi_ns += sched_clock() - t;
-			memcpy(ct07_spicap_prev + y0 * words_row, cur + y0 * words_row,
-			       (y1 - y0) * ct07_spicap_w * 2);
-			ct07_spicap_force_full = 0;
 			ct07_spicap_st.sent++;
 			ct07_spicap_st.rows += y1 - y0;
+			idle = 0;
 		} else {
 			ct07_spicap_st.skipped++;
+			idle++;
+		}
+		if (idle >= CT07_SPICAP_IDLE) {
+			spin_lock_irqsave(&ct07_sc_lock, flags);
+			if (ct07_sc.wdma >= 0 && !ct07_sc.detach &&
+			    ct07_sc.frame - ct07_sc.trigger_frame >= CT07_SPICAP_IDLE) {
+				ct07_sc.detach = 1;
+				wake_up(&ct07_spicap_wq);
+			}
+			spin_unlock_irqrestore(&ct07_sc_lock, flags);
 		}
 		ct07_spicap_stats_tick();
-		ACCESS_ONCE(ct07_spicap_ready[slot]) = 0;
-		wake_up(&ct07_spicap_txq);
-		slot ^= 1;
 	}
 	return 0;
 }
+
+#ifdef CONFIG_DEBUG_FS
+static int ct07_spicap_panel_open(struct inode *inode, struct file *file)
+{
+	size_t sz = ct07_spicap_w * ct07_spicap_h * 2;
+	void *snap = vmalloc(sz);
+
+	if (!snap)
+		return -ENOMEM;
+	mutex_lock(&ct07_spicap_prev_lock);
+	memcpy(snap, ct07_spicap_prev, sz);
+	mutex_unlock(&ct07_spicap_prev_lock);
+	file->private_data = snap;
+	return 0;
+}
+
+static ssize_t ct07_spicap_panel_read(struct file *file, char __user *buf,
+				      size_t count, loff_t *ppos)
+{
+	return simple_read_from_buffer(buf, count, ppos, file->private_data,
+				       ct07_spicap_w * ct07_spicap_h * 2);
+}
+
+static int ct07_spicap_panel_release(struct inode *inode, struct file *file)
+{
+	vfree(file->private_data);
+	return 0;
+}
+
+static const struct file_operations ct07_spicap_panel_fops = {
+	.open = ct07_spicap_panel_open,
+	.read = ct07_spicap_panel_read,
+	.release = ct07_spicap_panel_release,
+	.llseek = default_llseek,
+};
+#endif
 
 static void ct07_spicap_start(void)
 {
 	size_t sz;
 	struct task_struct *t;
+	void *p;
 	int i;
 
 	ct07_spicap_w = primary_display_get_width();
 	ct07_spicap_h = primary_display_get_height();
 	if (ct07_spicap_w != 240)
 		return;
-	sz = (ct07_spicap_w * ct07_spicap_h + 32) * 2;
+	sz = ct07_spicap_w * ct07_spicap_h * 2;
 	/* stock: kmalloc(GFP_KERNEL | GFP_DMA), pointers rounded up to 64 */
-	for (i = 0; i < 2; i++) {
-		ct07_spicap_slot[i] = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
-		if (!ct07_spicap_slot[i])
+	for (i = 0; i < CT07_SPICAP_SLOTS; i++) {
+		p = kmalloc(sz + 64, GFP_KERNEL | GFP_DMA);
+		if (!p)
 			goto nomem;
-		ct07_spicap_slot[i] = PTR_ALIGN(ct07_spicap_slot[i], 64);
+		ct07_sc.va[i] = PTR_ALIGN(p, 64);
+		if (ct07_memout_map(ct07_sc.va[i], sz, &ct07_sc.mva[i])) {
+			DISPERR("[CT07_SPICAP] no M4U mapping for slot %d\n", i);
+			return;
+		}
 	}
-	ct07_spicap_prev = kzalloc(sz, GFP_KERNEL);
-	if (!ct07_spicap_prev)
+	p = kzalloc(sz + 64, GFP_KERNEL | GFP_DMA);
+	if (!p)
 		goto nomem;
+	ct07_spicap_prev = PTR_ALIGN(p, 64);
+	ct07_spicap_cont_ok = ct07_memout_init() == 0;
 	t = kthread_run(ct07_spicap_spi_thread, NULL, "ct07_spicap_spi");
 	if (IS_ERR(t))
 		goto fail;
 	t = kthread_run(ct07_spicap_capture_thread, NULL, "trigger_spiCap_thread");
 	if (IS_ERR(t))
 		goto fail;
-	pr_notice("[CT07_SPICAP] SPI frame pusher started (%ux%u, pipelined, partial=%d)\n",
-		  ct07_spicap_w, ct07_spicap_h, ct07_spicap_partial);
+#ifdef CONFIG_DEBUG_FS
+	debugfs_create_file("ct07_spicap_panel", 0400, NULL, NULL, &ct07_spicap_panel_fops);
+#endif
+	pr_notice("[CT07_SPICAP] SPI frame pusher started (%ux%u, mode %d%s, partial=%d)\n",
+		  ct07_spicap_w, ct07_spicap_h, ct07_spicap_mode,
+		  ct07_spicap_cont_ok ? "" : ", continuous unavailable", ct07_spicap_partial);
 	return;
 fail:
 	DISPERR("[CT07_SPICAP] thread failed: %ld\n", PTR_ERR(t));

@@ -271,6 +271,16 @@ int primary_display_is_sleepd(void);
 #include <linux/wait.h>
 extern int ct07_spicap_pending;
 extern wait_queue_head_t ct07_spicap_wq;
+void ct07_spicap_frame_done(void);
+void ct07_spicap_memout_stopped(void);
+/* ... and its WDMA0 side, in primary_display.c */
+int ct07_memout_init(void);
+int ct07_memout_map(void *va, unsigned int size, unsigned int *mva);
+int ct07_capture_once(unsigned int mva);
+int ct07_memout_start(unsigned int mva);
+void ct07_memout_stop(void);
+void ct07_memout_retarget(unsigned int mva);
+unsigned int ct07_memout_target(void);
 int primary_display_is_sleepd_nolock(void);
 int primary_display_wait_for_vsync(void *config);
 unsigned int primary_display_get_ticket(void);

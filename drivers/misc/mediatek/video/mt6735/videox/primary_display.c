@@ -327,6 +327,7 @@ static bool _primary_path_IsForcedHPM(unsigned int needLock)
 #endif
 
 static void _cmdq_flush_config_handle_mira(void *handle, int blocking);
+static void ct07_memout_off_locked(void);
 
 #ifdef MTK_DISP_IDLE_LP
 static atomic_t isDdp_Idle = ATOMIC_INIT(0);
@@ -5636,6 +5637,8 @@ int primary_display_suspend(void)
 		DISPCHECK("primary display path is already sleep, skip\n");
 		goto done;
 	}
+	/* CT07: WDMA0 must be off the path before it is stopped and powered off */
+	ct07_memout_off_locked();
 #ifdef MTK_DISP_IDLE_LP
 	_disp_primary_path_exit_idle(__func__, 0);
 #endif
@@ -7206,6 +7209,9 @@ int primary_display_switch_mode_nolock(int sess_mode, unsigned int session, int 
 	if (pgc->session_mode == sess_mode)
 		goto done;
 
+	/* CT07: decouple and mirror modes drive WDMA0 themselves */
+	ct07_memout_off_locked();
+
 	DISPMSG("primary display will switch from %s to %s\n", session_mode_spy(pgc->session_mode),
 		session_mode_spy(sess_mode));
 
@@ -8095,6 +8101,8 @@ int primary_display_capture_framebuffer_ovl(unsigned long pbuf, unsigned int for
 
 	disp_sw_mutex_lock(&(pgc->capture_lock));
 	_primary_path_lock(__func__);
+	/* CT07: this capture borrows WDMA0 */
+	ct07_memout_off_locked();
 
 	if (pgc->state == DISP_SLEPT) {
 		/*memset_io((void *)pbuf, 0, buffer_size);*/
@@ -8109,6 +8117,12 @@ int primary_display_capture_framebuffer_ovl(unsigned long pbuf, unsigned int for
 	}
 
 	if (_is_decouple_mode(pgc->session_mode) || _is_mirror_mode(pgc->session_mode)) {
+		/* the decouple copy writes ARGB8888 whatever format was asked for:
+		 * a 16 bpp caller's buffer would be overrun by w * h * 2 bytes */
+		if (DP_COLOR_BITS_PER_PIXEL(format) != 32) {
+			ret = -1;
+			goto out;
+		}
 		primary_display_capture_framebuffer_decouple(pbuf, format);
 		/*memset_io((void *)pbuf, 0, buffer_size);*/
 		DISPMSG("primary capture: fill black for decouple & mirror mode End\n");
@@ -8225,6 +8239,189 @@ out:
 	DISPMSG("primary capture: end\n");
 
 	return ret;
+}
+
+/*
+ * CT07 SPI panel (the frame pusher is in common/mtkfb.c): WDMA0 copies the
+ * OVL0 output into RGB565 slots that the caller mapped once.
+ *
+ * ct07_capture_once(): one frame, the stock way (attach WDMA0 at a frame
+ * boundary, wait for its SOF, detach at the next boundary): 1.5-2 DDP
+ * frames with the path lock held, so SurfaceFlinger waits as well.
+ *
+ * ct07_memout_start()/ct07_memout_stop(): WDMA0 stays on the path while
+ * frames change. Its frame-done IRQ hands the written slot to mtkfb, which
+ * points WDMA0 at a free slot in the vertical blanking
+ * (ct07_memout_retarget()). A frame per DDP frame, and the path lock is
+ * only taken to attach and detach. Direct-link mode only; suspend, session
+ * mode switches and generic captures detach first (ct07_memout_off_locked).
+ */
+static int ct07_memout_on;
+static m4u_client_t *ct07_m4u;
+
+int ct07_memout_map(void *va, unsigned int size, unsigned int *mva)
+{
+	if (!ct07_m4u)
+		ct07_m4u = m4u_create_client();
+	if (!ct07_m4u)
+		return -ENOMEM;
+	return m4u_alloc_mva(ct07_m4u, M4U_PORT_DISP_WDMA0, (unsigned long)va, NULL, size,
+			     M4U_PROT_READ | M4U_PROT_WRITE, 0, mva);
+}
+
+/* capture lock and path lock held */
+static int ct07_memout_usable(void)
+{
+	return pgc->state != DISP_SLEPT && primary_display_cmdq_enabled() &&
+	       pgc->session_mode == DISP_SESSION_DIRECT_LINK_MODE;
+}
+
+/* queue "at the next frame boundary put WDMA0 behind OVL0, writing to mva" */
+static int ct07_memout_attach(cmdqRecHandle h, unsigned int mva)
+{
+	unsigned int w = primary_display_get_width();
+	unsigned int ht = primary_display_get_height();
+	disp_ddp_path_config *pconfig;
+
+	cmdqRecReset(h);
+	_cmdq_insert_wait_frame_done_token_mira(h);
+	if (dpmgr_path_add_memout(pgc->dpmgr_handle, ENGINE_OVL0, h))
+		return -EBUSY;	/* WDMA0 is on the path already, not for us */
+	dpmgr_path_memout_clock(pgc->dpmgr_handle, 1);
+
+	pconfig = dpmgr_path_get_last_config(pgc->dpmgr_handle);
+	pconfig->wdma_dirty = 1;
+	pconfig->wdma_config.dstAddress = mva;
+	pconfig->wdma_config.srcHeight = ht;
+	pconfig->wdma_config.srcWidth = w;
+	pconfig->wdma_config.clipX = 0;
+	pconfig->wdma_config.clipY = 0;
+	pconfig->wdma_config.clipHeight = ht;
+	pconfig->wdma_config.clipWidth = w;
+	pconfig->wdma_config.outputFormat = eRGB565;
+	pconfig->wdma_config.useSpecifiedAlpha = 1;
+	pconfig->wdma_config.alpha = 0xFF;
+	pconfig->wdma_config.dstPitch = w * 2;
+	pconfig->wdma_config.security = DISP_NORMAL_BUFFER;
+	dpmgr_path_config(pgc->dpmgr_handle, pconfig, h);
+	pconfig->wdma_dirty = 0;
+	_cmdq_set_config_handle_dirty_mira(h);
+	_cmdq_flush_config_handle_mira(h, 0);
+	return 0;
+}
+
+/* detach WDMA0 at the next frame boundary and wait until it happened */
+static void ct07_memout_detach(cmdqRecHandle h)
+{
+	cmdqRecReset(h);
+	_cmdq_insert_wait_frame_done_token_mira(h);
+	dpmgr_path_remove_memout(pgc->dpmgr_handle, h);
+	cmdqRecClearEventToken(h, CMDQ_EVENT_DISP_WDMA0_SOF);
+	_cmdq_set_config_handle_dirty_mira(h);
+	_cmdq_flush_config_handle_mira(h, 1);
+	dpmgr_path_memout_clock(pgc->dpmgr_handle, 0);
+}
+
+int ct07_capture_once(unsigned int mva)
+{
+	cmdqRecHandle h = NULL, hw = NULL;
+	int ret = -EAGAIN;
+
+	disp_sw_mutex_lock(&(pgc->capture_lock));
+	_primary_path_lock(__func__);
+	if (ct07_memout_on || !ct07_memout_usable())
+		goto out;
+	ret = -ENOMEM;
+	if (cmdqRecCreate(CMDQ_SCENARIO_PRIMARY_DISP, &h) ||
+	    cmdqRecCreate(CMDQ_SCENARIO_DISP_SCREEN_CAPTURE, &hw))
+		goto out;
+	ret = ct07_memout_attach(h, mva);
+	if (ret)
+		goto out;
+	cmdqRecReset(hw);
+	cmdqRecWait(hw, CMDQ_EVENT_DISP_WDMA0_SOF);
+	cmdqRecFlush(hw);
+	ct07_memout_detach(h);
+out:
+	_primary_path_unlock(__func__);
+	disp_sw_mutex_unlock(&(pgc->capture_lock));
+	cmdqRecDestroy(h);
+	cmdqRecDestroy(hw);
+	return ret;
+}
+
+int ct07_memout_start(unsigned int mva)
+{
+	cmdqRecHandle h = NULL;
+	int ret = 0;
+
+	disp_sw_mutex_lock(&(pgc->capture_lock));
+	_primary_path_lock(__func__);
+	if (ct07_memout_on)
+		goto out;
+	ret = -EAGAIN;
+	if (!ct07_memout_usable())
+		goto out;
+	ret = -ENOMEM;
+	if (cmdqRecCreate(CMDQ_SCENARIO_PRIMARY_DISP, &h))
+		goto out;
+	ret = ct07_memout_attach(h, mva);
+	if (!ret)
+		ct07_memout_on = 1;
+out:
+	_primary_path_unlock(__func__);
+	disp_sw_mutex_unlock(&(pgc->capture_lock));
+	cmdqRecDestroy(h);
+	return ret;
+}
+
+/* path lock held */
+static void ct07_memout_off_locked(void)
+{
+	cmdqRecHandle h = NULL;
+
+	if (!ct07_memout_on)
+		return;
+	ct07_memout_on = 0;	/* the IRQ stops handing out slots */
+	if (cmdqRecCreate(CMDQ_SCENARIO_PRIMARY_DISP, &h) == 0) {
+		ct07_memout_detach(h);
+	} else {
+		DISPERR("[CT07_SPICAP] no cmdq handle, WDMA0 detached by CPU\n");
+		dpmgr_path_remove_memout(pgc->dpmgr_handle, NULL);
+	}
+	cmdqRecDestroy(h);
+	ct07_spicap_memout_stopped();
+}
+
+void ct07_memout_stop(void)
+{
+	disp_sw_mutex_lock(&(pgc->capture_lock));
+	_primary_path_lock(__func__);
+	ct07_memout_off_locked();
+	_primary_path_unlock(__func__);
+	disp_sw_mutex_unlock(&(pgc->capture_lock));
+}
+
+/* WDMA0 frame-done IRQ: the vertical blanking has started */
+void ct07_memout_retarget(unsigned int mva)
+{
+	DISP_CPU_REG_SET(DISP_REG_WDMA_DST_ADDR0, mva);
+}
+
+unsigned int ct07_memout_target(void)
+{
+	return DISP_REG_GET(DISP_REG_WDMA_DST_ADDR0);
+}
+
+static void ct07_memout_irq(DISP_MODULE_ENUM module, unsigned int status)
+{
+	if (module == DISP_MODULE_WDMA0 && (status & 0x1) && ACCESS_ONCE(ct07_memout_on))
+		ct07_spicap_frame_done();
+}
+
+int ct07_memout_init(void)
+{
+	return disp_register_module_irq_callback(DISP_MODULE_WDMA0, ct07_memout_irq);
 }
 
 int primary_display_capture_framebuffer(unsigned long pbuf)
