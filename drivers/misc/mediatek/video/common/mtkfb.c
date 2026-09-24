@@ -94,13 +94,20 @@ DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
  *   frame-done IRQ publishes it and points WDMA0 at a free slot. After
  *   CT07_SPICAP_IDLE frames with neither a trigger nor a change, WDMA0 is
  *   detached again.
- * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{mode,partial,stats}
+ * Mode 0 also captures once more when no trigger came for
+ * ct07_spicap_settle_ms (0 = off): the last frame of an animation can be
+ * torn or not yet complete at the OVL output (m5c: "the tear is real at the
+ * OVL output"), a DSI panel redraws it on the next refresh, the SPI panel
+ * would keep it until the next trigger.
+ * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{mode,settle_ms,partial,stats}
  * (partial 0 = always full frames, stats = log every 256 frames).
  * /sys/kernel/debug/ct07_spicap_panel: the panel mirror, 240x320 RGB565
  * big-endian, i.e. what the panel is supposed to show right now.
  */
 static int ct07_spicap_mode;
 module_param(ct07_spicap_mode, int, 0644);
+static int ct07_spicap_settle_ms = 100;
+module_param(ct07_spicap_settle_ms, int, 0644);
 static int ct07_spicap_partial = 1;
 module_param(ct07_spicap_partial, int, 0644);
 static int ct07_spicap_stats = 1;
@@ -121,6 +128,7 @@ static struct {
 	unsigned int frame;		/* continuous: frames completed */
 	unsigned int trigger_frame;	/* frame at the last trigger */
 	int detach;			/* SPI side found the screen idle */
+	bool settle[CT07_SPICAP_SLOTS];	/* slot holds a settle capture */
 	u64 cap_ns;			/* stats since the last report */
 	unsigned int captured, dropped, lost;
 } ct07_sc = { .ready = -1, .wdma = -1 };
@@ -133,7 +141,7 @@ static unsigned int ct07_spicap_w, ct07_spicap_h;
 
 static struct {
 	u64 spi_ns, t0;
-	unsigned int frames, sent, skipped, rows;
+	unsigned int frames, sent, skipped, rows, settles, settle_sent;
 } ct07_spicap_st;
 
 /* ct07_sc_lock held */
@@ -170,6 +178,7 @@ void ct07_spicap_frame_done(void)
 		ct07_sc.lost++;
 		goto out;
 	}
+	ct07_sc.settle[s] = false;
 	ct07_slot_publish(s);
 	/* s is ready now and SPI holds at most one slot: one is free */
 	n = ct07_slot_free();
@@ -223,7 +232,7 @@ static void ct07_spicap_trigger_cont(void)
 }
 
 /* stock-like: one capture per trigger */
-static void ct07_spicap_trigger_once(void)
+static void ct07_spicap_trigger_once(bool settle)
 {
 	unsigned long flags;
 	int s, ret;
@@ -244,6 +253,7 @@ static void ct07_spicap_trigger_once(void)
 		ct07_sc.state[s] = CT07_SLOT_FREE;
 	} else {
 		ct07_sc.cap_ns += t;
+		ct07_sc.settle[s] = settle;
 		ct07_slot_publish(s);
 	}
 	spin_unlock_irqrestore(&ct07_sc_lock, flags);
@@ -256,16 +266,23 @@ static int ct07_spicap_capture_thread(void *data)
 	struct sched_param param = {.sched_priority = 94 };
 	unsigned long last_j = jiffies;
 	unsigned int seen = 0;
-	bool cont;
+	bool cont, settle = false, settle_now;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
-		if (ct07_sc.wdma >= 0)
+		settle_now = false;
+		if (ct07_sc.wdma >= 0) {
 			wait_event_interruptible_timeout(ct07_spicap_wq,
 				ct07_spicap_pending || ct07_sc.detach, HZ / 10);
-		else
+		} else if (settle && ct07_spicap_settle_ms > 0) {
+			settle_now = !wait_event_interruptible_timeout(ct07_spicap_wq,
+				ct07_spicap_pending || ct07_sc.detach,
+				msecs_to_jiffies(ct07_spicap_settle_ms));
+			settle = false;
+		} else {
 			wait_event_interruptible(ct07_spicap_wq,
 				ct07_spicap_pending || ct07_sc.detach);
+		}
 		cont = ct07_spicap_mode && ct07_spicap_cont_ok;
 
 		if (ct07_sc.wdma >= 0) {
@@ -281,7 +298,7 @@ static int ct07_spicap_capture_thread(void *data)
 			if (!cont || (ct07_sc.detach && !ct07_spicap_pending))
 				ct07_memout_stop();
 		}
-		if (!ct07_spicap_pending)
+		if (!ct07_spicap_pending && !settle_now)
 			continue;
 		ct07_spicap_pending = 0;
 		if (primary_display_is_sleepd())
@@ -291,7 +308,8 @@ static int ct07_spicap_capture_thread(void *data)
 			last_j = jiffies;
 			ct07_spicap_trigger_cont();
 		} else {
-			ct07_spicap_trigger_once();
+			ct07_spicap_trigger_once(settle_now);
+			settle = !settle_now;	/* re-arm after real triggers only */
 		}
 	}
 	return 0;
@@ -318,10 +336,11 @@ static void ct07_spicap_stats_tick(void)
 	dt = now - ct07_spicap_st.t0;
 	if (ct07_spicap_stats && dt) {
 		fps10 = div64_u64((u64)ct07_spicap_st.sent * 10000000000ULL, dt);
-		pr_info("[CT07_SPICAP] mode %d: %u frames in %llu ms, sent %u (%llu.%llu/s) skipped %u, captured %u dropped %u lost %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
+		pr_info("[CT07_SPICAP] mode %d: %u frames in %llu ms, sent %u (%llu.%llu/s) skipped %u, settle %u (sent %u), captured %u dropped %u lost %u, avg rows %u, avg capture %llu us, avg spi %llu us\n",
 			ct07_spicap_mode, ct07_spicap_st.frames, div_u64(dt, 1000000),
 			ct07_spicap_st.sent, div_u64(fps10, 10), fps10 - div_u64(fps10, 10) * 10,
-			ct07_spicap_st.skipped, captured, dropped, lost,
+			ct07_spicap_st.skipped, ct07_spicap_st.settles, ct07_spicap_st.settle_sent,
+			captured, dropped, lost,
 			ct07_spicap_st.sent ? ct07_spicap_st.rows / ct07_spicap_st.sent : 0,
 			captured ? div_u64(cap_ns, 1000 * captured) : 0,
 			ct07_spicap_st.sent ?
@@ -340,6 +359,7 @@ static int ct07_spicap_spi_thread(void *data)
 	bool full = true;	/* the panel still holds LK's logo */
 	unsigned long flags;
 	u32 *cur, *prev, x;
+	bool settle = false;
 	int s;
 	u64 t;
 
@@ -351,6 +371,7 @@ static int ct07_spicap_spi_thread(void *data)
 		if (s >= 0) {
 			ct07_sc.ready = -1;
 			ct07_sc.state[s] = CT07_SLOT_SPI;
+			settle = ct07_sc.settle[s];
 		}
 		spin_unlock_irqrestore(&ct07_sc_lock, flags);
 		if (s < 0)
@@ -390,6 +411,15 @@ static int ct07_spicap_spi_thread(void *data)
 		ct07_sc.state[s] = CT07_SLOT_FREE;
 		spin_unlock_irqrestore(&ct07_sc_lock, flags);
 
+		if (settle) {
+			ct07_spicap_st.settles++;
+			if (first <= last) {
+				/* the frame taken at the last trigger was not the final one */
+				ct07_spicap_st.settle_sent++;
+				pr_info_ratelimited("[CT07_SPICAP] settle capture changed rows %u-%u\n",
+						    first, last);
+			}
+		}
 		if (full || !ct07_spicap_partial) {
 			first = 0;
 			last = ct07_spicap_h - 1;
