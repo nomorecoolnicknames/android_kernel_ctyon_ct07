@@ -273,6 +273,9 @@ static int regex_match_full(char *str, struct regex *r, int len)
 
 static int regex_match_front(char *str, struct regex *r, int len)
 {
+	if (len < r->len)
+		return 0;
+
 	if (strncmp(str, r->pattern, r->len) == 0)
 		return 1;
 	return 0;
@@ -1383,7 +1386,9 @@ static int check_preds(struct filter_parse_state *ps)
 			continue;
 		}
 		n_normal_preds++;
-		WARN_ON_ONCE(cnt < 0);
+		/* all ops should have operands */
+		if (cnt < 0)
+			break;
 	}
 
 	if (cnt != 1 || !n_normal_preds || n_logical_preds >= n_normal_preds) {
@@ -1906,6 +1911,10 @@ static int create_filter(struct ftrace_event_call *call,
 		err = replace_preds(call, filter, ps, false);
 		if (err && set_str)
 			append_filter_err(ps, filter);
+	}
+	if (err && !set_str) {
+		free_event_filter(filter);
+		filter = NULL;
 	}
 	create_filter_finish(ps);
 
