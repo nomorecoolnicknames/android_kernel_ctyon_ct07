@@ -1913,6 +1913,18 @@ static void Ext_Speaker_Amp_Change(bool enable)
 		if (pin_extspkamp_2 != NULL_PIN_DEFINITION)
 			mt_set_gpio_out(pin_extspkamp_2, GPIO_OUT_ONE);	/* high enable */
 #else
+		/* CT07: the stock kernel sends the AW8736 enable pin (GPIO88,
+		 * extamp pinctrl) three rising edges 50 us apart - mode 3 - not a
+		 * single one (stock vmlinux Ext_Speaker_Amp_Change.part.34,
+		 * c07dd40c..c07dd460: select 1,0,1,0,1 with udelay(50) between). */
+		AudDrv_GPIO_EXTAMP_Select(true);
+		udelay(50);
+		AudDrv_GPIO_EXTAMP_Select(false);
+		udelay(50);
+		AudDrv_GPIO_EXTAMP_Select(true);
+		udelay(50);
+		AudDrv_GPIO_EXTAMP_Select(false);
+		udelay(50);
 		AudDrv_GPIO_EXTAMP_Select(true);
 		AudDrv_GPIO_EXTAMP2_Select(true);
 #endif /*CONFIG_MTK_LEGACY*/
