@@ -1,3 +1,4 @@
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -282,6 +283,15 @@ static bool ct07_lcm_spi_dispon;	/* DISPON sent since the last init */
 static void ct07_lcm_spi_dispon_workfn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(ct07_lcm_spi_dispon_work, ct07_lcm_spi_dispon_workfn);
 
+/*
+ * DISPON takes effect at the next panel frame; until then the panel still
+ * inserts the display-off blank page, white on this normally-white LCD
+ * (pie8 live: a very short white flash on unlock was left). The init sets
+ * B1h rtni = 18 clocks/line and 66h = 0x9a (fosc >= 575 kHz), i.e. a panel
+ * frame of about 10 ms or less; LK waits 10 ms after 0x29. Wait three.
+ */
+#define CT07_LCM_DISPON_SETTLE_MS 30
+
 /* sequence lock held */
 static void ct07_lcm_spi_dispon_locked(void)
 {
@@ -289,6 +299,8 @@ static void ct07_lcm_spi_dispon_locked(void)
 		return;
 	ct07_lcm_spi_send_cmd(0x29);
 	ct07_lcm_spi_dispon = true;
+	msleep(CT07_LCM_DISPON_SETTLE_MS);
+	pr_info("[CT07_LCM_SPI] display on, backlight released\n");
 	ct07_bl_hold(0);
 }
 
