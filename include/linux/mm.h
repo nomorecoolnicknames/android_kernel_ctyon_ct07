@@ -57,6 +57,12 @@ extern int sysctl_legacy_va_layout;
 #endif
 
 extern unsigned long sysctl_user_reserve_kbytes;
+
+#ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS
+extern const int mmap_rnd_bits_min;
+extern const int mmap_rnd_bits_max;
+extern int mmap_rnd_bits __read_mostly;
+#endif
 extern unsigned long sysctl_admin_reserve_kbytes;
 
 extern int sysctl_overcommit_memory;
