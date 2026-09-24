@@ -72,7 +72,7 @@
  * logo forever (live 2026-09-23: screencap shows the UI, panel shows logo).
  */
 int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
-			   unsigned int rows, unsigned int width);
+			   unsigned int rows, unsigned int width, bool whole);
 extern unsigned int ct07_lcm_spi_epoch;
 int ct07_spicap_pending;
 DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
@@ -430,8 +430,9 @@ static int ct07_spicap_spi_thread(void *data)
 				 (last / CT07_SPICAP_BAND + 1) * CT07_SPICAP_BAND);
 			t = sched_clock();
 			/* a failed write leaves the mirror ahead of the panel */
-			full = ct07_lcm_spi_send_rows((u8 *)ct07_spicap_prev, y0,
-						      y1 - y0, ct07_spicap_w) != 0;
+			full = ct07_lcm_spi_send_rows((u8 *)ct07_spicap_prev, y0, y1 - y0,
+						      ct07_spicap_w,
+						      y0 == 0 && y1 == ct07_spicap_h) != 0;
 			ct07_spicap_st.spi_ns += sched_clock() - t;
 			ct07_spicap_st.sent++;
 			ct07_spicap_st.rows += y1 - y0;

@@ -18,6 +18,7 @@
 /* #include <mach/mt_gpio.h> */
 #ifdef CONFIG_CT07_BL_PULSE
 #include <mt-plat/mt_gpio.h>
+#include "ct07_lcm_spi.h"
 #endif
 #include <disp_dts_gpio.h> /* DTS GPIO */
 #include <leds_drv.h>
@@ -272,6 +273,9 @@ static int disp_pwm_level_remap(disp_pwm_id_t id, int level_1024)
 static DEFINE_SPINLOCK(ct07_bl_lock);
 static int ct07_bl_step = -1;	/* stock starts at 0 and skips a first step-0 request */
 static int ct07_bl_off;
+static int ct07_bl_level;	/* last level driven */
+static int ct07_bl_held;	/* panel re-initialised, no picture yet */
+static int ct07_bl_pending;	/* level asked for while held */
 
 static void ct07_bl_gpio_out(void)
 {
@@ -280,13 +284,13 @@ static void ct07_bl_gpio_out(void)
 	mt_set_gpio_pull_enable(CT07_BL_GPIO, GPIO_PULL_DISABLE);
 }
 
-static void ct07_bl_set(int level_1024)
+/* ct07_bl_lock held */
+static void ct07_bl_apply(int level_1024)
 {
-	unsigned long flags;
 	int step = min(level_1024 / 128, 7);
 	int i;
 
-	spin_lock_irqsave(&ct07_bl_lock, flags);
+	ct07_bl_level = max(level_1024, 0);
 	if (level_1024 <= 0) {
 		ct07_bl_gpio_out();
 		mt_set_gpio_out(CT07_BL_GPIO, GPIO_OUT_ZERO);
@@ -307,6 +311,44 @@ static void ct07_bl_set(int level_1024)
 		}
 		ct07_bl_step = step;
 		ct07_bl_off = 0;
+	}
+}
+
+static void ct07_bl_set(int level_1024)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ct07_bl_lock, flags);
+	if (ct07_bl_held && level_1024 > 0) {
+		ct07_bl_pending = level_1024;
+	} else {
+		ct07_bl_pending = 0;
+		ct07_bl_apply(level_1024);
+	}
+	spin_unlock_irqrestore(&ct07_bl_lock, flags);
+}
+
+/*
+ * The SPI panel's GRAM holds no picture after a reset + init (pie5 live:
+ * a white flash on every unlock, the backlight came on ~60 ms before the
+ * first frame was written). ct07_lcm_spi holds the backlight off from the
+ * panel init until the first whole frame and DISPON have been sent.
+ */
+void ct07_bl_hold(int hold)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ct07_bl_lock, flags);
+	if (hold && !ct07_bl_held) {
+		ct07_bl_held = 1;
+		ct07_bl_pending = ct07_bl_level;
+		if (ct07_bl_level > 0)
+			ct07_bl_apply(0);
+	} else if (!hold && ct07_bl_held) {
+		ct07_bl_held = 0;
+		if (ct07_bl_pending > 0)
+			ct07_bl_apply(ct07_bl_pending);
+		ct07_bl_pending = 0;
 	}
 	spin_unlock_irqrestore(&ct07_bl_lock, flags);
 }

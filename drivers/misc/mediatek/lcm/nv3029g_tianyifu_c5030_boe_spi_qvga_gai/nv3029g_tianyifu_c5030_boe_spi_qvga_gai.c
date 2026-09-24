@@ -60,8 +60,9 @@ static const struct lcm_setting_table lcm_initialization_setting[] = {
 	{REGFLAG_DELAY, 200, {0x00}},
 	{0x36, 1, {0x08}},
 	{0x3a, 1, {0x65}},
-	{0x29, 0, {0x00}},
-	{REGFLAG_DELAY, 10, {0x00}},
+	/* LK and stock end with DISPON (0x29) + 10 ms here. The kernel only
+	 * runs this on resume, when GRAM holds no picture yet: DISPON comes
+	 * after the first whole frame (ct07_lcm_spi_panel_reset). */
 	{REGFLAG_END_OF_TABLE, 0, {0x00}},
 };
 
@@ -172,8 +173,7 @@ static void lcm_init(void)
 
 	push_table(lcm_initialization_setting,
 		   ARRAY_SIZE(lcm_initialization_setting));
-	/* reset + init: the frame pusher must resend the whole frame */
-	ct07_lcm_spi_epoch++;
+	ct07_lcm_spi_panel_reset();
 	ct07_lcm_diag_stage("nv3029_init_done");
 	pr_notice("[CT07_LCM] nv3029 init done\n");
 }

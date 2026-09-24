@@ -272,15 +272,58 @@ void ct07_lcm_spi_seq_end(void)
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_seq_end);
 
 /*
+ * After a reset + init the GRAM holds no picture, so the panel stays
+ * display-off and the backlight stays held (ct07_bl_hold) until the first
+ * whole frame is written; then DISPON, then the backlight. If no frame
+ * comes, the fallback work turns both on after CT07_LCM_DISPON_WAIT_MS.
+ */
+#define CT07_LCM_DISPON_WAIT_MS 500
+static bool ct07_lcm_spi_dispon;	/* DISPON sent since the last init */
+static void ct07_lcm_spi_dispon_workfn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(ct07_lcm_spi_dispon_work, ct07_lcm_spi_dispon_workfn);
+
+/* sequence lock held */
+static void ct07_lcm_spi_dispon_locked(void)
+{
+	if (ct07_lcm_spi_dispon)
+		return;
+	ct07_lcm_spi_send_cmd(0x29);
+	ct07_lcm_spi_dispon = true;
+	ct07_bl_hold(0);
+}
+
+static void ct07_lcm_spi_dispon_workfn(struct work_struct *work)
+{
+	ct07_lcm_spi_seq_begin();
+	if (!ct07_lcm_spi_dispon)
+		pr_notice("[CT07_LCM_SPI] no frame %d ms after panel init, display on anyway\n",
+			  CT07_LCM_DISPON_WAIT_MS);
+	ct07_lcm_spi_dispon_locked();
+	ct07_lcm_spi_seq_end();
+}
+
+/* the panel was reset and initialised without DISPON (lcm resume) */
+void ct07_lcm_spi_panel_reset(void)
+{
+	ct07_lcm_spi_seq_begin();
+	ct07_lcm_spi_dispon = false;
+	ct07_bl_hold(1);
+	ct07_lcm_spi_epoch++;	/* the frame pusher resends the whole frame */
+	ct07_lcm_spi_seq_end();
+	mod_delayed_work(system_wq, &ct07_lcm_spi_dispon_work,
+			 msecs_to_jiffies(CT07_LCM_DISPON_WAIT_MS));
+}
+EXPORT_SYMBOL_GPL(ct07_lcm_spi_panel_reset);
+
+/*
  * Window write (DCS CASET/RASET/RAMWR) of rows y0..y0+rows-1 of a
  * byte-swapped RGB565 frame. rows * width * 2 must stay a multiple of
- * 1024 above 1 KiB (mt_spi DMA packet rule). DISPON is sent once, after
- * the first frame, instead of after every frame as stock does.
+ * 1024 above 1 KiB (mt_spi DMA packet rule). DISPON follows the first
+ * whole frame after boot or a panel init, not every frame as in stock.
  */
 int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
-			   unsigned int rows, unsigned int width)
+			   unsigned int rows, unsigned int width, bool whole)
 {
-	static bool dispon;
 	unsigned int x1 = width - 1, y1 = y0 + rows - 1;
 	unsigned char win[4];
 	int ret;
@@ -295,10 +338,8 @@ int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
 	ret = ct07_lcm_spi_send_cmd(0x2c);
 	if (!ret)
 		ret = ct07_lcm_spi_send_data(buf + y0 * width * 2, rows * width * 2);
-	if (!dispon) {
-		ct07_lcm_spi_send_cmd(0x29);
-		dispon = true;
-	}
+	if (!ret && whole)
+		ct07_lcm_spi_dispon_locked();
 	ct07_lcm_spi_seq_end();
 	return ret;
 }
