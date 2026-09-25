@@ -1309,6 +1309,12 @@ static int kbase_open(struct inode *inode, struct file *filp)
 	init_waitqueue_head(&kctx->event_queue);
 	filp->private_data = kctx;
 
+	/* The mmap offset of a region is its GPU VA, and the EXEC and
+	 * CUSTOM_VA zones of 32-bit clients lie above 4GB. Without this
+	 * flag mmap() refuses such offsets on 32-bit kernels (EOVERFLOW).
+	 */
+	filp->f_mode |= FMODE_UNSIGNED_OFFSET;
+
 	kctx->infinite_cache_active = kbdev->infinite_cache_active_default;
 
 #ifdef CONFIG_DEBUG_FS
