@@ -84,8 +84,8 @@ ENDPROC(__vet_atags)
 /*
  * The VA is the 1 MiB strongly-ordered section __create_page_tables adds
  * for CONFIG_CT07_BRINGUP (arch/arm/kernel/head.S), so the stores below go
- * straight to DRAM and survive the watchdog reset. With the earlier
- * write-back mapping they parked in L1/L2 and were lost with the reset.
+ * straight to DRAM and survive the watchdog reset. Through a write-back
+ * mapping they would sit in L1/L2 and be lost with the reset.
  */
 	.macro	ct07_stamp_va, stage, ra, rb, rc
 	ldr	\ra, =CT07_RAM_CONSOLE_VA

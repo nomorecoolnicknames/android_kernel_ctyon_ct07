@@ -260,10 +260,10 @@ static int disp_pwm_level_remap(disp_pwm_id_t id, int level_1024)
 #ifdef CONFIG_CT07_BL_PULSE
 /*
  * CT07: the backlight IC hangs off GPIO69 in GPIO mode and counts pulses;
- * the DISP_PWM duty never reaches it (live 2026-09-24: mtgpio pin 69 is
- * mode 0, output high; brightness 0 left the backlight on, so the blanked
- * normally-white panel showed solid white). Stock disp_pwm_set_backlight
- * (c043e9e8 in the boot-stock.bin kernel) does, under a spinlock:
+ * the DISP_PWM duty never reaches it (mtgpio pin 69 is mode 0, output
+ * high: with the duty alone brightness 0 leaves the backlight on, and the
+ * blanked normally-white panel shows solid white). Stock disp_pwm_set_backlight
+ * (c043e9e8 in the stock kernel) does, under a spinlock:
  *   level 0: GPIO69 low, udelay(200); the IC shuts down while it stays low;
  *   else:    step = level_1024 / 128; when the step changed or the IC was
  *            off: low 80 us, high 100 us (disp_driverIC_en, c043e274),
@@ -329,9 +329,9 @@ static void ct07_bl_set(int level_1024)
 }
 
 /*
- * The SPI panel's GRAM holds no picture after a reset + init (pie5 live:
- * a white flash on every unlock, the backlight came on ~60 ms before the
- * first frame was written). ct07_lcm_spi holds the backlight off from the
+ * The SPI panel's GRAM holds no picture after a reset + init (a backlight
+ * switched on ~60 ms before the first frame is written shows a white flash
+ * on every unlock). ct07_lcm_spi holds the backlight off from the
  * panel init until the first whole frame and DISPON have been sent.
  */
 void ct07_bl_hold(int hold)

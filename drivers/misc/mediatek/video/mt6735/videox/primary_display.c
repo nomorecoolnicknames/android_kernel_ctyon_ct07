@@ -8286,7 +8286,7 @@ static int ct07_memout_attach(cmdqRecHandle h, unsigned int mva)
 	cmdqRecReset(h);
 	_cmdq_insert_wait_frame_done_token_mira(h);
 	if (dpmgr_path_add_memout(pgc->dpmgr_handle, ENGINE_OVL0, h))
-		return -EBUSY;	/* WDMA0 is on the path already, not for us */
+		return -EBUSY;	/* WDMA0 is already in use on the path */
 	dpmgr_path_memout_clock(pgc->dpmgr_handle, 1);
 
 	pconfig = dpmgr_path_get_last_config(pgc->dpmgr_handle);

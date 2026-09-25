@@ -40,14 +40,14 @@ static DEFINE_MUTEX(ct07_lcm_spi_lock);
  * round. ct07_lcm_spi_lock only covers single transfers.
  */
 static DEFINE_MUTEX(ct07_lcm_spi_seq_lock);
-/* bumped after every panel (re)initialisation: its GRAM is not ours then */
+/* bumped after every panel (re)initialisation: its GRAM content is unknown then */
 unsigned int ct07_lcm_spi_epoch;
 EXPORT_SYMBOL_GPL(ct07_lcm_spi_epoch);
 /*
  * Commands and register parameters come from the stack or from const
  * tables at any byte address, but mt_spi DMA wants a 4-byte aligned TX
  * buffer ("mt-spi: Warning! Tx_DMA address should be 4Byte alignment,
- * buf:db2f7eef" on every frame, disp1 live 2026-09-23). Short transfers go
+ * buf:db2f7eef" on every frame otherwise). Short transfers go
  * through this bounce buffer; frames are already 64-byte aligned.
  */
 #define CT07_LCM_SPI_BOUNCE 64
@@ -286,7 +286,7 @@ static DECLARE_DELAYED_WORK(ct07_lcm_spi_dispon_work, ct07_lcm_spi_dispon_workfn
 /*
  * DISPON takes effect at the next panel frame; until then the panel still
  * inserts the display-off blank page, white on this normally-white LCD
- * (pie8 live: a very short white flash on unlock was left). The init sets
+ * (a very short white flash on unlock). The init sets
  * B1h rtni = 18 clocks/line and 66h = 0x9a (fosc >= 575 kHz), i.e. a panel
  * frame of about 10 ms or less; LK waits 10 ms after 0x29. Wait three.
  */

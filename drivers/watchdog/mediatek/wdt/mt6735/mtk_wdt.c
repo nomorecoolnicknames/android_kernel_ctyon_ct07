@@ -838,14 +838,14 @@ static void __exit mtk_wdt_exit(void)
 }
 #ifdef CONFIG_CT07_BRINGUP
 /*
- * CT07 R1 (2026-09-02): keep DRAM in self-refresh across a watchdog reset so
- * the ram console ring at 0x43F00000 and the pstore zones at 0x43F10000
- * survive into the next boot (m5c p43, kernel-m5c-4.9-lc 90620e0e4, proven
- * by 303562a05). Until now DDR-reserve was only reachable through
- * wd_api->wd_dram_reserved_mode() from the full-MRDUMP path, which is off.
+ * CT07: keep DRAM in self-refresh across a watchdog reset so the ram
+ * console ring at 0x43F00000 and the pstore zones at 0x43F10000 survive
+ * into the next boot. Otherwise DDR-reserve is only reachable through
+ * wd_api->wd_dram_reserved_mode() from the full-MRDUMP path, which is
+ * off on this board.
  *
- * MODE register read-modify-write ONLY, never a LENGTH write: m681
- * HANDOFF_v44 s0.4 killed a boot by arming LENGTH+MODE from start_kernel.
+ * MODE register read-modify-write ONLY, never a LENGTH write: writing
+ * LENGTH together with MODE this early can fire the watchdog during boot.
  * Every later writer of MTK_WDT_MODE in this file (mtk_wdt_mode_config,
  * mtk_wdt_enable, wdt_arch_reset) is itself a RMW that leaves bit 7
  * (MTK_WDT_MODE_DDR_RESERVE) alone, so the bit set here survives the

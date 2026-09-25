@@ -69,7 +69,7 @@
  * a SCHED_FIFO thread captures the OVL output as RGB565 through WDMA,
  * byte-swaps each pixel and pushes the frame over SPI (stock
  * trigger_spiCap_thread / SpiSendData). Without it the panel keeps LK's
- * logo forever (live 2026-09-23: screencap shows the UI, panel shows logo).
+ * logo forever (the framebuffer holds the UI, the panel still the logo).
  */
 int ct07_lcm_spi_send_rows(const unsigned char *buf, unsigned int y0,
 			   unsigned int rows, unsigned int width, bool whole);
@@ -89,8 +89,8 @@ DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
  *
  * ct07_spicap_mode 0 (stock-like): one capture per trigger,
  *   ct07_capture_once(), 1.5-2 DDP frames each with the path lock held.
- * ct07_spicap_mode 1 (continuous, default; pie5 benchmark: 21.5-24.8
- *   frames/s sent against 12.0-13.9 in mode 0): a trigger attaches WDMA0 behind OVL0
+ * ct07_spicap_mode 1 (continuous, default; about 22-25 frames/s sent
+ *   against 12-14 in mode 0): a trigger attaches WDMA0 behind OVL0
  *   (ct07_memout_start); each DDP frame lands in a slot, and the WDMA0
  *   frame-done IRQ publishes it and points WDMA0 at a free slot. After
  *   CT07_SPICAP_IDLE frames with neither a trigger nor a change, WDMA0 is
@@ -98,8 +98,8 @@ DECLARE_WAIT_QUEUE_HEAD(ct07_spicap_wq);
  *   way; WDMA0 giving no frame for 250 ms switches to mode 0 for good.
  * Mode 0 also captures once more when no trigger came for
  * ct07_spicap_settle_ms (0 = off): the last frame of an animation can be
- * torn or not yet complete at the OVL output (m5c: "the tear is real at the
- * OVL output"), a DSI panel redraws it on the next refresh, the SPI panel
+ * torn or not yet complete at the OVL output (the tear is real at the
+ * OVL output); a DSI panel redraws it on the next refresh, the SPI panel
  * would keep it until the next trigger.
  * Runtime switches: /sys/module/mtkfb/parameters/ct07_spicap_{mode,settle_ms,partial,stats}
  * (partial 0 = always full frames, stats = log every 256 frames).

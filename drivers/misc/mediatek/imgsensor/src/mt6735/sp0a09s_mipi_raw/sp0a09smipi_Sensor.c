@@ -1209,8 +1209,8 @@ static kal_uint32 feature_control(MSDK_SENSOR_FEATURE_ENUM feature_id,
             break;
         case SENSOR_FEATURE_GET_DEFAULT_FRAME_RATE_BY_SCENARIO:
             /* CT07: the HAL passes the result pointer in the second slot.
-             * After a failed kdSetDriver it passed NULL and the store below
-             * oopsed cameraserver into a kernel panic (2026-09-23 live1). */
+             * After a failed kdSetDriver it passes NULL, and the store below
+             * would oops cameraserver into a kernel panic. */
             if (!(uintptr_t)(*(feature_data+1)))
                 return ERROR_INVALID_PARA;
             get_default_framerate_by_scenario((MSDK_SCENARIO_ID_ENUM)*(feature_data), (MUINT32 *)(uintptr_t)(*(feature_data+1)));

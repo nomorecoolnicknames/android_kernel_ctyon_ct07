@@ -276,9 +276,9 @@ void last_kmsg_store_to_emmc(void)
  * and, with PSTORE=y, made sram_log_save() a pure forward to
  * pstore_bconsole_write(), which is a silent no-op until ramoops registers
  * at postcore_initcall (fs/pstore/platform.c: "if (psinfo)"). A kernel that
- * dies before that left a valid DBGC header and an empty ring (m5c P9/P10,
- * kernel-m5c-4.9-lc 0c9418f99 + f1d4d19d9; CT07 2026-09-02 analysis). The
- * writer is now compiled unconditionally and used by both variants.
+ * dies before that leaves a valid DBGC header and an empty ring. So the
+ * writer is compiled unconditionally and used by both variants, with and
+ * without CONFIG_PSTORE.
  */
 static void ram_console_dram_save(const char *msg, int count)
 {
@@ -569,7 +569,7 @@ static int __init ram_console_init(struct ram_console_buffer *buffer, size_t buf
 	buffer->log_size = 0;
 	memset_io((void *)buffer + buffer->off_linux, 0, buffer_size - buffer->off_linux);
 	/*
-	 * Register the ram console even with CONFIG_PSTORE (m5c 0c9418f99):
+	 * Register the ram console even with CONFIG_PSTORE:
 	 * CON_PRINTBUFFER replays everything printed so far into the DRAM
 	 * ring, and pstore's own console coexists with it from postcore on.
 	 */

@@ -520,7 +520,7 @@ static noinline __noreturn void __init ct07_early_pc_marker_spin(void)
 /*
  * CT07 early stage stamps, the C continuation of the ct07_stamp splatter in
  * arch/arm/kernel/head.S: 128 words of 0xSSSSSSSS over the MediaTek ram
- * console ring at PA 0x43F00000 + 0x200, read back after the death through
+ * console ring at PA 0x43F00000 + 0x200, read back after a reset through
  * /proc/aed/reboot-reason. No driver, no printk, no console needed.
  *
  * VA 0xC3F00000 is valid at every call site: before paging_init() through
@@ -802,9 +802,9 @@ static struct timer_list ct07_reboot_timer;
 static struct work_struct ct07_reboot_work;
 
 /*
- * 30..1800 s. The lower bound used to be 600 s, which made the 2026-09-02
- * "ct07_reboot_after=100" images silently unarmed: keep the range wide
- * enough to fire before the ~150 s power-off under investigation.
+ * 30..1800 s. A 600 s lower bound silently ignored shorter values such as
+ * "ct07_reboot_after=100"; the wide range lets the restart fire before an
+ * early power-off.
  */
 static int __init ct07_reboot_after_setup(char *str)
 {
@@ -823,10 +823,10 @@ early_param("ct07_reboot_after", ct07_reboot_after_setup);
  * Stage 1: an orderly kernel_restart("recovery"). It reaches arch_reset()
  * through the MTK restart handler (wd_api.c), which calls
  * rtc_mark_recovery(); LK honours that mark and boots the recovery
- * partition (p8) — proven live on 2026-09-02 with "adb reboot recovery"
- * from the stock kernel (last_kmsg: "arch_reset: cmd = recovery" →
- * "mtk_rtc_common: rtc_mark_recovery" → TWRP up 25 s later). Landing in
- * TWRP is what makes the ROM kernel's last_kmsg readable without a button.
+ * partition (p8), as it does for "adb reboot recovery" on the stock kernel
+ * (last_kmsg: "arch_reset: cmd = recovery", then
+ * "mtk_rtc_common: rtc_mark_recovery"). Landing in the recovery makes the
+ * last_kmsg of the kernel under test readable without a button.
  * Stage 2, 30 s later, if the orderly path wedged: plain emergency_restart().
  */
 static void ct07_reboot_work_fn(struct work_struct *work)
@@ -876,13 +876,13 @@ static int ct07_wdt_diag_thread(void *unused)
 {
 	int elapsed;
 
-	/* CT07: kick the watchdog FOREVER so recovery userspace stays alive
-	 * long enough to bring up adb / be inspected. The bounded window was
-	 * only useful for the early-hang diagnostic; now the kernel reaches
-	 * userspace and we must prevent the ~30s HW-WDT fallback. A test image
-	 * can request an emergency warm reboot with
-	 * ct07_reboot_after=<600..1800>. This attempts a default warm reboot;
-	 * actual arrival in the p7 fallback still requires live proof. */
+	/* CT07: kick the watchdog for as long as the thread runs, so a
+	 * diagnostic userspace that does not service the watchdog itself is
+	 * not reset by the ~30 s hardware watchdog while it is inspected over
+	 * adb. An emergency warm reboot can still be requested with
+	 * ct07_reboot_after=<30..1800> (ct07_reboot_timer_fn: recovery
+	 * restart first, then emergency_restart()).
+	 */
 	for (elapsed = 0; ; elapsed += CT07_WDT_DIAG_INTERVAL_MS / 1000) {
 		if (kthread_should_stop())
 			break;

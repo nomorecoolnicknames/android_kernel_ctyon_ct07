@@ -31,12 +31,12 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-dwarf2-cfi-asm)
 # -fpic gcc emits orphan .data.rel*/.data.rel.ro* sections that this tree's
 # linker script does not place; the ARM linker then parks them ABOVE
 # __bss_start, and __mmap_switched's BSS clear zeroes init_task, init_mm and
-# every relocated pointer before start_kernel's first store faults on them
-# (docs/run_reports/ct07_prestart_code_recon.md, findings 9-17). The stock
+# every relocated pointer before start_kernel's first store faults on them,
+# before any console output. The stock
 # kernel (gcc 4.8, no -fpic) has none of these sections. Last flag wins, so
 # arch/arm/boot/compressed keeps the -fpic it wants via ccflags-y, which
 # kbuild appends after KBUILD_CFLAGS (scripts/Makefile.lib orig_c_flags).
-# scripts/build_ct07_kernel.sh additionally asserts the post-link layout.
+# A vmlinux with any .data.rel* section left is a PIC build: reject it.
 KBUILD_CFLAGS	+= -fno-pic
 
 # Do not use arch/arm/defconfig - it's always outdated.

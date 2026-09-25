@@ -25,27 +25,27 @@
 /*
  * CT07 pre-MMU boot stamp.
  *
- * Our source kernel dies before console_init, so no console, no pstore and no
- * AEE callback ever exist to say how far it got (2026-09-02: WDT status 5,
- * fiq step 0, LAST PC parked in ATF, cores 1-3 dead). The only channel that
- * demonstrably survives that death and is readable afterwards from stock TWRP
- * is the MediaTek ram console ring in DRAM at 0x43F00000: the next kernel
- * copies it before reuse and prints its "last_reboot_reason" through
- * /proc/aed/reboot-reason, where we already read a preserved record.
+ * A kernel that dies before console_init leaves no console, no pstore and
+ * no AEE record of how far it got; the watchdog status alone (WDT status 5,
+ * fiq step 0, last PC in ATF) does not tell. What survives such a reset and
+ * can be read afterwards from a recovery kernel is the MediaTek ram console
+ * ring in DRAM at 0x43F00000: the next kernel copies it before reuse and
+ * prints its "last_reboot_reason" through /proc/aed/reboot-reason, fiq_step
+ * included.
  *
  * So stamp fiq_step directly in physical DRAM, with the MMU still off and
  * without any driver. Layout (drivers/misc/mediatek/ram_console/mtk_ram_console.c):
  *   ring+0x00  sig       must be REBOOT_REASON_SIG 0x43474244
  *   ring+0x2c  off_linux offset of struct last_reboot_reason
  *   ring+off_linux+0x00  fiq_step   <- what /proc/aed/reboot-reason prints
- * The write is skipped unless the signature is already there (LK sets it), so
  * The store is done twice: unconditionally at the default off_linux of 512,
  * and again at whatever off_linux the header advertises when the signature
- * is present. The first attempt (guarded only) produced fiq step 0, which
- * could equally mean "the guard rejected" or "the kernel never ran".
+ * (set by LK) is present. A store guarded by the signature alone cannot
+ * tell a missing signature from a kernel that never ran: both leave fiq
+ * step 0.
  *
  * Values are 0xA0 | stage so they cannot be confused with the driver's own
- * fiq steps (1..41 seen live).
+ * fiq steps (1..41).
  */
 #define CT07_RAM_CONSOLE_PA	0x43F00000
 #define CT07_RC_SIG		0x43474244
@@ -57,9 +57,9 @@
 	@ /proc/aed/reboot-reason prints many of its words (fiq_step, exp_type,
 	@ mcdi_*, deepidle, sodi*, spm_suspend, clk_data[8], vcore_dvfs_*), so
 	@ whatever the real offset is, several printed fields must change if a
-	@ single instruction of this kernel ever executes. Two earlier attempts
-	@ wrote one word at one offset and read back 0, which could not tell
-	@ "never ran" from "wrong offset".
+	@ single instruction of this kernel ever executes. One word at one offset
+	@ that reads back 0 could not tell "never ran" from "wrong offset"; a
+	@ splatter can.
 	ldr	\ra, =CT07_RAM_CONSOLE_PA
 	add	\ra, \ra, #0x200
 	mov	\rc, #\stage
@@ -398,15 +398,15 @@ __create_page_tables:
 	 * otherwise maps only the kernel image and the identity page, and the
 	 * linear map does not exist until paging_init(), so a store to
 	 * 0xC3F00000 from __mmap_switched would fault and be indistinguishable
-	 * from "the kernel never got there" (that ambiguity cost a cycle).
+	 * from "the kernel never got there".
 	 * One 1 MiB section, PA 0x43F00000 -> VA 0xC3F00000.
 	 *
 	 * It must be strongly-ordered (io_mmuflags: TEX=0 C=0 B=0 -> PRRR
 	 * index 0), not mm_mmuflags: the kernel sections are write-back
 	 * write-allocate (0x11c0e = TEX1|C|B|S), so a stamp written through
 	 * them sits in L1/L2 until something evicts it, and a watchdog reset
-	 * drops the caches. That is why bringup-map-20260902 never showed
-	 * 0xA4 even though it mapped the frame. XN as for the DEBUG_LL map.
+	 * drops the caches, so the stamp would be lost although the frame is
+	 * mapped. XN as for the DEBUG_LL map.
 	 * paging_init() overwrites this entry with the normal lowmem map.
 	 */
 	ldr	r7, [r10, #PROCINFO_IO_MMUFLAGS]

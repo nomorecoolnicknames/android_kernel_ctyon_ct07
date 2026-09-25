@@ -1424,11 +1424,11 @@ static void mt_eint_irq_ack(struct irq_data *data)
 /*
  * CT07: EINT_FUNC.gpio[] is only filled by the DT xlate path. An EINT set
  * up through gpio_to_irq() (msdc1 card detect) used to read uninitialised
- * kmalloc memory here and WARN in gpio_to_desc ('invalid GPIO -645220332',
- * 8.71 s, 2026-09-23); gpiolib then returned level 0. Keep exactly that
- * behaviour (level 0) without touching an invalid GPIO. Recording the pin
- * in mt_gpio_to_irq() instead (d1a27d74) changed the dual-edge polarity of
- * that EINT and boot-looped the phone before adbd (cam2, bisected 2026-09-24).
+ * kmalloc memory here and WARN in gpio_to_desc ('invalid GPIO ...'); gpiolib
+ * then returned level 0. Keep exactly that behaviour (level 0) without
+ * touching an invalid GPIO. Recording the pin in mt_gpio_to_irq() instead
+ * changes the dual-edge polarity of that EINT, and the phone then
+ * boot-loops before adbd.
  */
 static int mt_eint_get_level(unsigned int eint_num)
 {
