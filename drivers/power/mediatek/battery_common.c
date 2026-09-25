@@ -297,6 +297,9 @@ static enum power_supply_property battery_props[] = {
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_CAPACITY,
+	/* Standard names for a stock healthd: voltage_now in uV, temp in 0.1 degC */
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_TEMP,
 	/* Add for Battery Service */
 	POWER_SUPPLY_PROP_batt_vol,
 	POWER_SUPPLY_PROP_batt_temp,
@@ -590,6 +593,12 @@ static int battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		val->intval = data->BAT_CAPACITY;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = data->BAT_batt_vol * 1000;	/* batt_vol is in mV */
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		val->intval = data->BAT_batt_temp;	/* batt_temp is in 0.1 degC */
 		break;
 	case POWER_SUPPLY_PROP_batt_vol:
 		val->intval = data->BAT_batt_vol;
