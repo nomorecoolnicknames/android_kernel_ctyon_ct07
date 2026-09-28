@@ -526,11 +526,11 @@ static void mlog_procinfo(void)
 		if (!p->signal)
 			goto unlock_continue;
 
-#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER_AUTODETECT_OOM_ADJ_VALUES
+		/*
+		 * signal->oom_adj is gone since 3.x; the local copy of the LMK
+		 * conversion works with or without the in-kernel LMK.
+		 */
 		oom_score_adj = lowmem_oom_score_adj_to_oom_adj(p->signal->oom_score_adj);
-#else
-		oom_score_adj = p->signal->oom_adj;
-#endif
 
 		if (max_adj < oom_score_adj || oom_score_adj < min_adj)
 			goto unlock_continue;
