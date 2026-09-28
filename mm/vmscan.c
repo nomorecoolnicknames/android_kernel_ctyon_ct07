@@ -1962,6 +1962,18 @@ module_param_named(threshold, vmscan_threshold, int, S_IRUGO | S_IWUSR);
 /* #define LOGTAG "VMSCAN" */
 static unsigned long t;	/* 0 */
 static unsigned long history[2] = {0};
+
+/*
+ * Page-cache floor below which a thrashing zone goes back to size-weighted
+ * anon/file scanning. With the in-kernel LMK this is its third minfree level;
+ * without it (userspace lmkd on memcg) use the value the ActivityManager
+ * writes there on the CT07: 10997 pages, 43 MB.
+ */
+#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER
+#define GMO_THRASH_CACHE_MIN	(lowmem_minfree[2])
+#else
+#define GMO_THRASH_CACHE_MIN	10997
+#endif
 #endif
 
 #endif /* CONFIG_ZRAM */
@@ -2125,7 +2137,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 		} else {
 			cached = global_page_state(NR_FILE_PAGES) - global_page_state(NR_SHMEM) -
 				total_swapcache_pages();
-			if (cached > lowmem_minfree[2]) {
+			if (cached > GMO_THRASH_CACHE_MIN) {
 				anon_prio = vmscan_swappiness(sc);
 				file_prio = vmscan_swap_sum - vmscan_swappiness(sc);
 			} else {
